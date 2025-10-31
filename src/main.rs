@@ -10,6 +10,9 @@ use std::fs;
 use std::time::Instant;
 use chrono::{DateTime, Utc};
 use std::path::Path;
+use std::io::{Write, BufWriter};
+use std::fs::{OpenOptions, File};
+use std::sync::{Arc, Mutex};
 
 // ============================
 // CLI and Config
@@ -42,6 +45,55 @@ struct ConfigFile {
     prod_max: Config,
     prod_mega: Config,
     test: Config,
+}
+
+// ============================
+// Logging System
+// ============================
+
+struct Logger {
+    file: Arc<Mutex<BufWriter<File>>>,
+}
+
+impl Logger {
+    fn new() -> Self {
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("bglogs.txt")
+            .expect("Failed to open bglogs.txt");
+        
+        let buffered = BufWriter::new(file);
+        Logger {
+            file: Arc::new(Mutex::new(buffered)),
+        }
+    }
+    
+    fn log(&self, message: &str) {
+        // Print to stdout and flush immediately for tmux
+        println!("{}", message);
+        std::io::stdout().flush().ok();
+        
+        // Also write to log file
+        if let Ok(mut file) = self.file.lock() {
+            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+            writeln!(file, "[{}] {}", timestamp, message).ok();
+            file.flush().ok();
+        }
+    }
+}
+
+// Create global logger - will be initialized lazily
+lazy_static::lazy_static! {
+    static ref LOGGER: Logger = Logger::new();
+}
+
+// Macro for easy logging
+macro_rules! log_info {
+    ($($arg:tt)*) => {{
+        let message = format!($($arg)*);
+        LOGGER.log(&message);
+    }};
 }
 
 // ============================
@@ -1124,16 +1176,16 @@ fn search(problem: &Problem, max_outer: usize, seed_beam: usize, random_seed: u6
             no_improve_count = 0;
             stagnation_counter = 0;
             exploration_strength = 1.0;  // Reset exploration
-            println!("  Iter {}: {:.6} ⬆️ IMPROVED (+{:.6})", iter + 1, beam[0].value, improvement);
+            log_info!("  Iter {}: {:.6} ⬆️ IMPROVED (+{:.6})", iter + 1, beam[0].value, improvement);
         } else {
             no_improve_count += 1;
             stagnation_counter += 1;
             
             // Show exploration status
             if stagnation_counter > 3 {
-                println!("  Iter {}: {:.6} (exploring, strength: {:.2})", iter + 1, beam[0].value, exploration_strength);
+                log_info!("  Iter {}: {:.6} (exploring, strength: {:.2})", iter + 1, beam[0].value, exploration_strength);
             } else {
-                println!("  Iter {}: {:.6} (no improve: {})", iter + 1, beam[0].value, no_improve_count);
+                log_info!("  Iter {}: {:.6} (no improve: {})", iter + 1, beam[0].value, no_improve_count);
             }
         }
 
@@ -1145,7 +1197,7 @@ fn search(problem: &Problem, max_outer: usize, seed_beam: usize, random_seed: u6
         };
         
         if no_improve_count >= effective_patience {
-            println!("✓ Early stopping at iteration {} (no improvement for {} iterations)", 
+            log_info!("✓ Early stopping at iteration {} (no improvement for {} iterations)", 
                      iter + 1, effective_patience);
             break;
         }
@@ -1153,7 +1205,7 @@ fn search(problem: &Problem, max_outer: usize, seed_beam: usize, random_seed: u6
 
     // Multi-stage restart if stuck below threshold
     if best_so_far < 3200.50 && max_outer > 50 {
-        println!("  🔄 Stage 2: Aggressive restart with mutations...");
+        log_info!("  🔄 Stage 2: Aggressive restart with mutations...");
         
         // Keep best solution and create mutations
         let best_solution = beam[0].clone();
@@ -1250,7 +1302,7 @@ fn search(problem: &Problem, max_outer: usize, seed_beam: usize, random_seed: u6
             
             if restart_beam[0].value > best_so_far {
                 best_so_far = restart_beam[0].value;
-                println!("  Stage 2 Iter {}: {:.6} ⬆️ BREAKTHROUGH!", iter + 1, restart_beam[0].value);
+                log_info!("  Stage 2 Iter {}: {:.6} ⬆️ BREAKTHROUGH!", iter + 1, restart_beam[0].value);
             }
         }
         
@@ -1295,7 +1347,7 @@ fn main() {
         return;
     }
     
-    println!("Orb Optimizer (Rust) — initializing...");
+    log_info!("Orb Optimizer (Rust) — initializing...");
     
     // Load configuration
     let config_content = fs::read_to_string("config.toml")
@@ -1317,23 +1369,23 @@ fn main() {
         }
     };
     
-    println!("Configuration: {} - {}", args.config, config.description);
-    println!("  Beam size: {}", config.beam_size);
-    println!("  Seeds: {}", config.seeds);
-    println!("  Parallel chunks: {}", config.parallel_chunks);
-    println!("  Patience: {}", config.patience);
-    println!("  Max iterations: {}\n", config.iterations);
+    log_info!("Configuration: {} - {}", args.config, config.description);
+    log_info!("  Beam size: {}", config.beam_size);
+    log_info!("  Seeds: {}", config.seeds);
+    log_info!("  Parallel chunks: {}", config.parallel_chunks);
+    log_info!("  Patience: {}", config.patience);
+    log_info!("  Max iterations: {}\n", config.iterations);
 
     let problem = Problem::new();
-    println!("Problem setup complete: {} towns, {} orbs", NUM_TOWNS, NUM_ORBS);
-    println!("Target: 3200.51+\n");
+    log_info!("Problem setup complete: {} towns, {} orbs", NUM_TOWNS, NUM_ORBS);
+    log_info!("Target: 3200.51+\n");
 
     // Generate seeds based on config
     let seeds_to_try: Vec<u64> = (1..=config.seeds as u64).map(|i| i * 1234 + i * i).collect();
     
-    println!("Processing {} seeds in parallel ({} at a time)...\n", seeds_to_try.len(), config.parallel_chunks);
-    println!("Starting optimization... (this may take a while with large beam sizes)");
-    println!("Looking for scores > 3200.51...\n");
+    log_info!("Processing {} seeds in parallel ({} at a time)...\n", seeds_to_try.len(), config.parallel_chunks);
+    log_info!("Starting optimization... (this may take a while with large beam sizes)");
+    log_info!("Looking for scores > 3200.51...\n");
     
     // Process seeds in parallel chunks
     let chunk_size = config.parallel_chunks;
@@ -1350,7 +1402,7 @@ fn main() {
                 let result = search(&problem, config.iterations, config.beam_size, seed, config.patience);
                 let seed_duration = seed_start.elapsed();
                 let global_idx = seeds_processed + chunk_idx;
-                println!("  Seed {}/{} ({}): {:.6} | Time: {:.1}s", 
+                log_info!("  Seed {}/{} ({}): {:.6} | Time: {:.1}s", 
                          global_idx + 1, config.seeds, seed, result.value, seed_duration.as_secs_f32());
                 
                 // Save and print high scores (> 3200.49)
@@ -1377,13 +1429,13 @@ fn main() {
                     if let Err(e) = results_file.save() {
                         eprintln!("Failed to save to results.json: {}", e);
                     } else {
-                        println!("    💾 Saved to results.json!");
+                        log_info!("    💾 Saved to results.json!");
                     }
                     
                     // Print for scores > 3200.51
                     if result.value > 3200.51 {
-                        println!("    🎯 BREAKTHROUGH! Score: {:.6}", result.value);
-                        println!("    Coordinates: {:?}", coords);
+                        log_info!("    🎯 BREAKTHROUGH! Score: {:.6}", result.value);
+                        log_info!("    Coordinates: {:?}", coords);
                     }
                 }
                 
@@ -1402,15 +1454,15 @@ fn main() {
             };
 
             if is_better {
-                println!(">>> 🔥 NEW BEST: {:.6} <<<", value);
+                log_info!(">>> 🔥 NEW BEST: {:.6} <<<", value);
                 if value > 3200.50 && value <= 3200.51 {
-                    println!("    ⚠️  So close! Only {:.6} away from target!", 3200.51 - value);
+                    log_info!("    ⚠️  So close! Only {:.6} away from target!", 3200.51 - value);
                 }
                 best_overall = Some(result);
                 
                 // Early exit if we hit the target
                 if value > 3200.51 {
-                    println!("\n🎯 TARGET REACHED! Score: {:.6}", value);
+                    log_info!("\n🎯 TARGET REACHED! Score: {:.6}", value);
                     break;
                 }
             }
@@ -1440,51 +1492,51 @@ fn main() {
             let eta = ((config.seeds - seeds_processed) as f32 / rate) as u64;
             
             if let Some(ref best) = best_overall {
-                println!("\n=== PROGRESS UPDATE ===");
-                println!("  Seeds: {}/{} ({:.1}%)", seeds_processed, config.seeds, 
+                log_info!("\n=== PROGRESS UPDATE ===");
+                log_info!("  Seeds: {}/{} ({:.1}%)", seeds_processed, config.seeds, 
                          (seeds_processed as f32 / config.seeds as f32) * 100.0);
-                println!("  Current best: {:.6}", best.value);
-                println!("  Time elapsed: {}m {}s", elapsed.as_secs() / 60, elapsed.as_secs() % 60);
-                println!("  Speed: {:.2} seeds/sec", rate);
-                println!("  ETA: ~{}m {}s", eta / 60, eta % 60);
+                log_info!("  Current best: {:.6}", best.value);
+                log_info!("  Time elapsed: {}m {}s", elapsed.as_secs() / 60, elapsed.as_secs() % 60);
+                log_info!("  Speed: {:.2} seeds/sec", rate);
+                log_info!("  ETA: ~{}m {}s", eta / 60, eta % 60);
                 if best.value > 3200.49 {
-                    println!("  Distance to target: {:.6}", 3200.51 - best.value);
+                    log_info!("  Distance to target: {:.6}", 3200.51 - best.value);
                 }
-                println!();
+                log_info!("");
             }
         }
     }
 
     let result = best_overall.unwrap();
 
-    println!("\n=== FINAL RESULT ===");
-    println!("Best objective value: {:.6}", result.value);
+    log_info!("\n=== FINAL RESULT ===");
+    log_info!("Best objective value: {:.6}", result.value);
     if result.value > 3200.51 {
-        println!("✅ SUCCESS! Score exceeds 3200.51");
+        log_info!("✅ SUCCESS! Score exceeds 3200.51");
     } else {
-        println!("⚠️  Score below target (3200.51)");
+        log_info!("⚠️  Score below target (3200.51)");
     }
-    println!("\nOrb coordinates (x, y):");
+    log_info!("\nOrb coordinates (x, y):");
     for i in 0..NUM_ORBS {
-        println!("({:.6}, {:.6})", result.orbs[[i, 0]], result.orbs[[i, 1]]);
+        log_info!("({:.6}, {:.6})", result.orbs[[i, 0]], result.orbs[[i, 1]]);
     }
     
     // Display current high scores from results.json
-    println!("\n=== HIGH SCORES LEADERBOARD (from results.json) ===");
+    log_info!("\n=== HIGH SCORES LEADERBOARD (from results.json) ===");
     let results_file = ResultsFile::load();
     if results_file.high_scores.is_empty() {
-        println!("No scores above 3200.49 recorded yet.");
+        log_info!("No scores above 3200.49 recorded yet.");
     } else {
         for (i, score) in results_file.high_scores.iter().take(10).enumerate() {
-            println!("#{}: {:.6} | Config: {} | Seed: {} | {}", 
+            log_info!("#{}: {:.6} | Config: {} | Seed: {} | {}", 
                      i + 1, score.score, score.config, score.seed, 
                      score.timestamp.format("%Y-%m-%d %H:%M:%S UTC"));
             if i == 0 {
                 // Show coordinates for the best score
-                println!("  Best coordinates: {:?}", score.coordinates);
+                log_info!("  Best coordinates: {:?}", score.coordinates);
             }
         }
-        println!("\nTotal high scores recorded: {}", results_file.high_scores.len());
+        log_info!("\nTotal high scores recorded: {}", results_file.high_scores.len());
     }
 }
 

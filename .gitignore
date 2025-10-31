@@ -25,4 +25,5 @@
 # Results tracking
 results.json
 results*.txt
+bglogs.txt
 
