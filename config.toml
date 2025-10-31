@@ -2,10 +2,19 @@
 # M3 Pro 18GB RAM configuration
 beam_size = 50
 seeds = 500
-parallel_chunks = 4
+parallel_chunks = 8
 patience = 10
 iterations = 200
-description = "Optimized for M3 Pro with 18GB RAM"
+description = "Optimized for M3 Pro with 18GB RAM - 8 parallel"
+
+[local_max]
+# M3 Pro maximum performance
+beam_size = 100
+seeds = 200
+parallel_chunks = 10
+patience = 8
+iterations = 150
+description = "M3 Pro max performance - uses 10 cores"
 
 [prod]
 # Ubuntu 32GB RAM server configuration

@@ -36,6 +36,7 @@ struct Config {
 #[derive(Debug, Deserialize)]
 struct ConfigFile {
     local: Config,
+    local_max: Config,
     prod: Config,
     prod_ultra: Config,
     prod_max: Config,
@@ -717,6 +718,7 @@ fn main() {
     
     let config = match args.config.as_str() {
         "local" => config_file.local,
+        "local_max" => config_file.local_max,
         "prod" => config_file.prod,
         "prod_ultra" => config_file.prod_ultra,
         "prod_max" => config_file.prod_max,
