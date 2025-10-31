@@ -9,12 +9,21 @@ description = "Optimized for M3 Pro with 18GB RAM"
 
 [prod]
 # Ubuntu 32GB RAM server configuration
-beam_size = 80
+beam_size = 200
 seeds = 5000
 parallel_chunks = 8
 patience = 10
 iterations = 500
 description = "Optimized for Ubuntu server with 32GB RAM"
+
+[prod_ultra]
+# Maximum RAM usage for 32GB server
+beam_size = 300
+seeds = 2000
+parallel_chunks = 8
+patience = 8
+iterations = 300
+description = "Ultra mode - trades RAM for quality (uses ~4GB)"
 
 [test]
 # Quick testing configuration

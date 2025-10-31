@@ -34,6 +34,7 @@ struct Config {
 struct ConfigFile {
     local: Config,
     prod: Config,
+    prod_ultra: Config,
     test: Config,
 }
 
@@ -649,6 +650,7 @@ fn main() {
     let config = match args.config.as_str() {
         "local" => config_file.local,
         "prod" => config_file.prod,
+        "prod_ultra" => config_file.prod_ultra,
         "test" => config_file.test,
         _ => {
             eprintln!("Unknown config: {}. Using 'local'", args.config);
