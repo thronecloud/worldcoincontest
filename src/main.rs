@@ -638,6 +638,74 @@ fn weighted_farthest_seed<R: Rng>(
 // Local improvement
 // ============================
 
+// Genetic crossover - combine two good solutions
+fn crossover<R: Rng>(
+    parent1: &Array2<f64>,
+    parent2: &Array2<f64>,
+    rng: &mut R,
+) -> Array2<f64> {
+    let mut child = Array2::<f64>::zeros((NUM_ORBS, 2));
+    
+    // Uniform crossover with repair
+    for i in 0..NUM_ORBS {
+        if rng.gen::<f64>() < 0.5 {
+            child[[i, 0]] = parent1[[i, 0]];
+            child[[i, 1]] = parent1[[i, 1]];
+        } else {
+            child[[i, 0]] = parent2[[i, 0]];
+            child[[i, 1]] = parent2[[i, 1]];
+        }
+    }
+    
+    // Repair minimum separation violations
+    for i in 0..NUM_ORBS {
+        let pos = project_minsep(&child, i, [child[[i, 0]], child[[i, 1]]], MIN_SEP);
+        child[[i, 0]] = pos[0];
+        child[[i, 1]] = pos[1];
+    }
+    
+    child
+}
+
+// Advanced perturbation with adaptive strength
+fn adaptive_perturbation<R: Rng>(
+    orbs: &Array2<f64>,
+    rng: &mut R,
+    strength: f64,
+) -> Array2<f64> {
+    let mut perturbed = orbs.clone();
+    
+    // Perturb 30-50% of orbs
+    let num_to_perturb = rng.gen_range(3..=5);
+    let mut indices: Vec<usize> = (0..NUM_ORBS).collect();
+    indices.shuffle(rng);
+    
+    for &idx in indices.iter().take(num_to_perturb) {
+        // Levy flight for better exploration
+        let levy_step = if rng.gen::<f64>() < 0.1 {
+            // Occasional large jump
+            rng.gen::<f64>() * 4.0 - 2.0
+        } else {
+            // Normal perturbation
+            let normal = Normal::new(0.0, strength).unwrap();
+            rng.sample(normal)
+        };
+        
+        perturbed[[idx, 0]] += levy_step;
+        perturbed[[idx, 1]] += levy_step * (rng.gen::<f64>() * 2.0 - 1.0);
+        
+        let pos = [
+            clip(perturbed[[idx, 0]], 0.0, (GRID_N - 1) as f64),
+            clip(perturbed[[idx, 1]], 0.0, (GRID_N - 1) as f64),
+        ];
+        let proj = project_minsep(&perturbed, idx, pos, MIN_SEP);
+        perturbed[[idx, 0]] = proj[0];
+        perturbed[[idx, 1]] = proj[1];
+    }
+    
+    perturbed
+}
+
 fn improve_once<R: Rng>(problem: &Problem, orbs: &Array2<f64>, rng: &mut R) -> (Array2<f64>, f64) {
     let mut best_orbs = orbs.clone();
     let mut best_val = problem.objective(&best_orbs);
@@ -661,7 +729,13 @@ fn improve_once<R: Rng>(problem: &Problem, orbs: &Array2<f64>, rng: &mut R) -> (
 
         let mut oi = [best_orbs[[i, 0]], best_orbs[[i, 1]]];
 
-        for _ in 0..15 {
+        // Adaptive gradient descent with momentum
+        let mut momentum_x = 0.0;
+        let mut momentum_y = 0.0;
+        let momentum_decay = 0.9;
+        let mut learning_rate = 0.8;  // Increased initial learning rate
+        
+        for iter in 0..20 {  // More iterations
             let mut grad_x = 0.0;
             let mut grad_y = 0.0;
 
@@ -677,11 +751,20 @@ fn improve_once<R: Rng>(problem: &Problem, orbs: &Array2<f64>, rng: &mut R) -> (
             if grad_x.abs() < 1e-12 && grad_y.abs() < 1e-12 {
                 break;
             }
+            
+            // Apply momentum
+            momentum_x = momentum_decay * momentum_x - learning_rate * grad_x;
+            momentum_y = momentum_decay * momentum_y - learning_rate * grad_y;
+            
+            // Adaptive learning rate
+            if iter > 10 {
+                learning_rate *= 0.95;  // Decay learning rate
+            }
 
-            let mut step_x = -0.6 * grad_x;
-            let mut step_y = -0.6 * grad_y;
-            step_x = clip(step_x, -2.0, 2.0);
-            step_y = clip(step_y, -2.0, 2.0);
+            let mut step_x = momentum_x;
+            let mut step_y = momentum_y;
+            step_x = clip(step_x, -3.0, 3.0);  // Wider clip range
+            step_y = clip(step_y, -3.0, 3.0);
 
             // Backtracking line search
             let mut step_scale = 1.0;
@@ -948,7 +1031,11 @@ fn search(problem: &Problem, max_outer: usize, seed_beam: usize, random_seed: u6
     let mut best_so_far = beam[0].value;
     let mut no_improve_count = 0;
 
-    // Outer improvement loop
+    // Adaptive exploration strength
+    let mut exploration_strength: f64 = 1.0;
+    let mut stagnation_counter = 0;
+    
+    // Outer improvement loop with advanced strategies
     for iter in 0..max_outer {
         // Parallel improvement of beam members
         let new_results: Vec<(Array2<f64>, f64)> = beam
@@ -963,6 +1050,34 @@ fn search(problem: &Problem, max_outer: usize, seed_beam: usize, random_seed: u6
         for (orbs, val) in new_results {
             new_beam.push(Result { orbs, value: val });
         }
+        
+        // Genetic crossover - combine top solutions
+        if beam.len() >= 2 && iter % 3 == 0 {  // Every 3rd iteration
+            let num_crossovers = (seed_beam / 4).max(2);
+            for _ in 0..num_crossovers {
+                let parent1_idx = rng.gen_range(0..beam.len().min(5));  // Top 5
+                let parent2_idx = rng.gen_range(0..beam.len().min(5));
+                if parent1_idx != parent2_idx {
+                    let child = crossover(&beam[parent1_idx].orbs, &beam[parent2_idx].orbs, &mut rng);
+                    let child_val = problem.objective(&child);
+                    new_beam.push(Result { orbs: child, value: child_val });
+                }
+            }
+        }
+        
+        // Adaptive perturbation for exploration
+        if stagnation_counter > 3 {
+            exploration_strength *= 1.2;  // Increase exploration when stuck
+            exploration_strength = exploration_strength.min(3.0);
+            
+            // Add strongly perturbed versions of top solutions
+            for i in 0..beam.len().min(3) {
+                let perturbed = adaptive_perturbation(&beam[i].orbs, &mut rng, exploration_strength);
+                let perturbed_val = problem.objective(&perturbed);
+                new_beam.push(Result { orbs: perturbed, value: perturbed_val });
+            }
+        }
+        
         // Also keep originals
         new_beam.extend(beam.clone());
 
@@ -1004,22 +1119,149 @@ fn search(problem: &Problem, max_outer: usize, seed_beam: usize, random_seed: u6
         // Check for improvement and early stopping
         let improved = beam[0].value > best_so_far + 1e-9;
         if improved {
+            let improvement = beam[0].value - best_so_far;
             best_so_far = beam[0].value;
             no_improve_count = 0;
-            println!("  Iter {}: {:.6} ⬆️ IMPROVED", iter + 1, beam[0].value);
+            stagnation_counter = 0;
+            exploration_strength = 1.0;  // Reset exploration
+            println!("  Iter {}: {:.6} ⬆️ IMPROVED (+{:.6})", iter + 1, beam[0].value, improvement);
         } else {
             no_improve_count += 1;
-            println!("  Iter {}: {:.6} (no improve: {})", iter + 1, beam[0].value, no_improve_count);
+            stagnation_counter += 1;
+            
+            // Show exploration status
+            if stagnation_counter > 3 {
+                println!("  Iter {}: {:.6} (exploring, strength: {:.2})", iter + 1, beam[0].value, exploration_strength);
+            } else {
+                println!("  Iter {}: {:.6} (no improve: {})", iter + 1, beam[0].value, no_improve_count);
+            }
         }
 
-        // Early stopping
-        if no_improve_count >= patience {
+        // Modified early stopping - allow more iterations during exploration
+        let effective_patience = if exploration_strength > 2.0 {
+            patience * 2  // Double patience during strong exploration
+        } else {
+            patience
+        };
+        
+        if no_improve_count >= effective_patience {
             println!("✓ Early stopping at iteration {} (no improvement for {} iterations)", 
-                     iter + 1, patience);
+                     iter + 1, effective_patience);
             break;
         }
     }
 
+    // Multi-stage restart if stuck below threshold
+    if best_so_far < 3200.50 && max_outer > 50 {
+        println!("  🔄 Stage 2: Aggressive restart with mutations...");
+        
+        // Keep best solution and create mutations
+        let best_solution = beam[0].clone();
+        let mut restart_seeds = Vec::new();
+        
+        // Add heavily mutated versions of best
+        for _ in 0..seed_beam / 2 {
+            let mutated = adaptive_perturbation(&best_solution.orbs, &mut rng, 2.5);
+            restart_seeds.push(mutated);
+        }
+        
+        // Add completely new random seeds
+        while restart_seeds.len() < seed_beam {
+            restart_seeds.push(weighted_farthest_seed(problem, &mut rng, 250));
+        }
+        
+        // Create new beam from restart seeds
+        let mut restart_beam: Vec<Result> = restart_seeds
+            .into_iter()
+            .map(|s| {
+                let val = problem.objective(&s);
+                Result { orbs: s, value: val }
+            })
+            .collect();
+        
+        // Keep the original best
+        restart_beam.push(best_solution);
+        restart_beam.sort_by(|a, b| b.value.partial_cmp(&a.value).unwrap());
+        restart_beam.truncate(seed_beam);
+        
+        // Run aggressive optimization for 20 more iterations
+        for iter in 0..20 {
+            let new_results: Vec<(Array2<f64>, f64)> = restart_beam
+                .par_iter()
+                .map(|r| {
+                    let mut local_rng = StdRng::seed_from_u64(random_seed + 5000 + iter as u64);
+                    improve_once(problem, &r.orbs, &mut local_rng)
+                })
+                .collect();
+            
+            let mut new_beam = Vec::new();
+            for (orbs, val) in new_results {
+                new_beam.push(Result { orbs, value: val });
+            }
+            
+            // Aggressive crossover
+            if restart_beam.len() >= 2 {
+                for _ in 0..seed_beam / 3 {
+                    let p1 = rng.gen_range(0..restart_beam.len());
+                    let p2 = rng.gen_range(0..restart_beam.len());
+                    if p1 != p2 {
+                        let child = crossover(&restart_beam[p1].orbs, &restart_beam[p2].orbs, &mut rng);
+                        let child_val = problem.objective(&child);
+                        new_beam.push(Result { orbs: child, value: child_val });
+                    }
+                }
+            }
+            
+            new_beam.extend(restart_beam.clone());
+            new_beam.sort_by(|a, b| b.value.partial_cmp(&a.value).unwrap());
+            
+            // Aggressive deduplication
+            let mut unique = Vec::new();
+            for cand in new_beam {
+                if unique.is_empty() {
+                    unique.push(cand);
+                    continue;
+                }
+                
+                let mut is_dupe = false;
+                for u in &unique {
+                    let mut dist_sq = 0.0;
+                    for i in 0..NUM_ORBS {
+                        for j in 0..2 {
+                            let diff = cand.orbs[[i, j]] - u.orbs[[i, j]];
+                            dist_sq += diff * diff;
+                        }
+                    }
+                    if dist_sq < 1e-12 {
+                        is_dupe = true;
+                        break;
+                    }
+                }
+                
+                if !is_dupe {
+                    unique.push(cand);
+                }
+                if unique.len() >= seed_beam {
+                    break;
+                }
+            }
+            
+            restart_beam = unique;
+            
+            if restart_beam[0].value > best_so_far {
+                best_so_far = restart_beam[0].value;
+                println!("  Stage 2 Iter {}: {:.6} ⬆️ BREAKTHROUGH!", iter + 1, restart_beam[0].value);
+            }
+        }
+        
+        // Return best from restart
+        if restart_beam[0].value > beam[0].value {
+            return restart_beam.into_iter()
+                .max_by(|a, b| a.value.partial_cmp(&b.value).unwrap())
+                .unwrap();
+        }
+    }
+    
     beam.into_iter()
         .max_by(|a, b| a.value.partial_cmp(&b.value).unwrap())
         .unwrap()
