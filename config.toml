@@ -1,0 +1,26 @@
+[local]
+# M3 Pro 18GB RAM configuration
+beam_size = 50
+seeds = 500
+parallel_chunks = 4
+patience = 10
+iterations = 200
+description = "Optimized for M3 Pro with 18GB RAM"
+
+[prod]
+# Ubuntu 32GB RAM server configuration
+beam_size = 80
+seeds = 5000
+parallel_chunks = 8
+patience = 10
+iterations = 500
+description = "Optimized for Ubuntu server with 32GB RAM"
+
+[test]
+# Quick testing configuration
+beam_size = 20
+seeds = 10
+parallel_chunks = 2
+patience = 5
+iterations = 50
+description = "Quick testing mode"

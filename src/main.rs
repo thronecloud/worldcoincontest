@@ -4,6 +4,38 @@ use rand::SeedableRng;
 use rand_distr::Normal;
 use rayon::prelude::*;
 use std::f64::consts::E;
+use clap::Parser;
+use serde::Deserialize;
+use std::fs;
+
+// ============================
+// CLI and Config
+// ============================
+
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Configuration to use: local, prod, or test
+    #[arg(default_value = "local")]
+    config: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Config {
+    beam_size: usize,
+    seeds: usize,
+    parallel_chunks: usize,
+    patience: usize,
+    iterations: usize,
+    description: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConfigFile {
+    local: Config,
+    prod: Config,
+    test: Config,
+}
 
 // ============================
 // Constants
@@ -88,20 +120,20 @@ impl Problem {
         for i in 0..NUM_TOWNS {
             let tx = self.towns[[i, 0]];
             let ty = self.towns[[i, 1]];
-            let mut min_dist = f64::MAX;
+            let mut min_dist_sq = f64::MAX;
 
             for j in 0..NUM_ORBS {
                 let ox = orbs[[j, 0]];
                 let oy = orbs[[j, 1]];
                 let dx = tx - ox;
                 let dy = ty - oy;
-                let dist = (dx * dx + dy * dy).sqrt();
-                if dist < min_dist {
-                    min_dist = dist;
+                let dist_sq = dx * dx + dy * dy;
+                if dist_sq < min_dist_sq {
+                    min_dist_sq = dist_sq;
                 }
             }
 
-            total += self.weights[i] * alpha(min_dist);
+            total += self.weights[i] * alpha(min_dist_sq.sqrt());
         }
         total
     }
@@ -111,7 +143,7 @@ impl Problem {
         for i in 0..NUM_TOWNS {
             let tx = self.towns[[i, 0]];
             let ty = self.towns[[i, 1]];
-            let mut min_dist = f64::MAX;
+            let mut min_dist_sq = f64::MAX;
             let mut nearest = 0;
 
             for j in 0..NUM_ORBS {
@@ -119,9 +151,9 @@ impl Problem {
                 let oy = orbs[[j, 1]];
                 let dx = tx - ox;
                 let dy = ty - oy;
-                let dist = (dx * dx + dy * dy).sqrt();
-                if dist < min_dist {
-                    min_dist = dist;
+                let dist_sq = dx * dx + dy * dy;
+                if dist_sq < min_dist_sq {
+                    min_dist_sq = dist_sq;
                     nearest = j;
                 }
             }
@@ -472,7 +504,7 @@ struct Result {
     value: f64,
 }
 
-fn search(problem: &Problem, max_outer: usize, seed_beam: usize, random_seed: u64) -> Result {
+fn search(problem: &Problem, max_outer: usize, seed_beam: usize, random_seed: u64, patience: usize) -> Result {
     let mut rng = StdRng::seed_from_u64(random_seed);
 
     // Generate seeds
@@ -520,7 +552,6 @@ fn search(problem: &Problem, max_outer: usize, seed_beam: usize, random_seed: u6
     // Early stopping variables
     let mut best_so_far = beam[0].value;
     let mut no_improve_count = 0;
-    const EARLY_STOP_PATIENCE: usize = 10;
 
     // Outer improvement loop
     for iter in 0..max_outer {
@@ -587,9 +618,9 @@ fn search(problem: &Problem, max_outer: usize, seed_beam: usize, random_seed: u6
         }
 
         // Early stopping
-        if no_improve_count >= EARLY_STOP_PATIENCE {
+        if no_improve_count >= patience {
             println!("✓ Early stopping at iteration {} (no improvement for {} iterations)", 
-                     iter + 1, EARLY_STOP_PATIENCE);
+                     iter + 1, patience);
             break;
         }
     }
@@ -604,41 +635,106 @@ fn search(problem: &Problem, max_outer: usize, seed_beam: usize, random_seed: u6
 // ============================
 
 fn main() {
+    // Parse command line arguments
+    let args = Args::parse();
+    
     println!("Orb Optimizer (Rust) — initializing...");
+    
+    // Load configuration
+    let config_content = fs::read_to_string("config.toml")
+        .expect("Failed to read config.toml");
+    let config_file: ConfigFile = toml::from_str(&config_content)
+        .expect("Failed to parse config.toml");
+    
+    let config = match args.config.as_str() {
+        "local" => config_file.local,
+        "prod" => config_file.prod,
+        "test" => config_file.test,
+        _ => {
+            eprintln!("Unknown config: {}. Using 'local'", args.config);
+            config_file.local
+        }
+    };
+    
+    println!("Configuration: {} - {}", args.config, config.description);
+    println!("  Beam size: {}", config.beam_size);
+    println!("  Seeds: {}", config.seeds);
+    println!("  Parallel chunks: {}", config.parallel_chunks);
+    println!("  Patience: {}", config.patience);
+    println!("  Max iterations: {}\n", config.iterations);
 
     let problem = Problem::new();
     println!("Problem setup complete: {} towns, {} orbs", NUM_TOWNS, NUM_ORBS);
     println!("Target: 3200.51+\n");
 
-    // Generate 1000 seeds for extensive exploration with early stopping
-    let seeds_to_try: Vec<u64> = (1..=1000).map(|i| i * 1234 + i * i).collect();
+    // Generate seeds based on config
+    let seeds_to_try: Vec<u64> = (1..=config.seeds as u64).map(|i| i * 1234 + i * i).collect();
+    
+    println!("Processing {} seeds in parallel ({} at a time)...\n", seeds_to_try.len(), config.parallel_chunks);
+    
+    // Process seeds in parallel chunks
+    let chunk_size = config.parallel_chunks;
     let mut best_overall: Option<Result> = None;
+    let mut seeds_processed = 0;
+    
+    for chunk in seeds_to_try.chunks(chunk_size) {
+        let chunk_results: Vec<(usize, Result)> = chunk
+            .par_iter()
+            .enumerate()
+            .map(|(chunk_idx, &seed)| {
+                let result = search(&problem, config.iterations, config.beam_size, seed, config.patience);
+                let global_idx = seeds_processed + chunk_idx;
+                println!("  Seed {}/{} ({}): {:.6}", global_idx + 1, config.seeds, seed, result.value);
+                
+                // Print coordinates for high scores
+                if result.value > 3200.49 {
+                    println!("    ⭐ HIGH SCORE! Coordinates:");
+                    for i in 0..NUM_ORBS {
+                        println!("      Orb {}: ({:.6}, {:.6})", i + 1, result.orbs[[i, 0]], result.orbs[[i, 1]]);
+                    }
+                }
+                
+                (global_idx, result)
+            })
+            .collect();
+        
+        // Check results and update best
+        for (_idx, result) in chunk_results {
+            let value = result.value;
+            
+            let is_better = if let Some(ref best) = best_overall {
+                value > best.value
+            } else {
+                true
+            };
 
-    for (idx, seed) in seeds_to_try.iter().enumerate() {
-        println!("=== Run {}/{} (seed={}) ===", idx + 1, seeds_to_try.len(), seed);
-        let result = search(&problem, 500, 50, *seed);
-        let value = result.value;
-        println!("Result: {:.6}", value);
-        println!("Coordinates:");
-        for i in 0..NUM_ORBS {
-            println!("  Orb {}: ({:.6}, {:.6})", i + 1, result.orbs[[i, 0]], result.orbs[[i, 1]]);
+            if is_better {
+                println!("🔥 New best: {:.6}", value);
+                best_overall = Some(result);
+                
+                // Early exit if we hit the target
+                if value > 3200.51 {
+                    println!("\n🎯 TARGET REACHED!");
+                    break;
+                }
+            }
         }
-        println!();
-
-        let is_better = if let Some(ref best) = best_overall {
-            value > best.value
-        } else {
-            true
-        };
-
-        if is_better {
-            best_overall = Some(result);
+        
+        seeds_processed += chunk.len();
+        
+        // Early exit from outer loop if target reached
+        if let Some(ref best) = best_overall {
+            if best.value > 3200.51 {
+                break;
+            }
         }
-
-        // Early exit if we hit the target
-        if value > 3200.51 {
-            println!("🎯 TARGET REACHED!");
-            break;
+        
+        // Progress update every 100 seeds (or every 10 for test mode)
+        let update_freq = if config.seeds <= 100 { 10 } else { 100 };
+        if seeds_processed % update_freq == 0 {
+            if let Some(ref best) = best_overall {
+                println!("Progress: {}/{} seeds, Current best: {:.6}", seeds_processed, config.seeds, best.value);
+            }
         }
     }
 
