@@ -246,6 +246,291 @@ fn edge_biased_seed() -> Array2<f64> {
     Array2::from_shape_vec((NUM_ORBS, 2), data).unwrap()
 }
 
+// K-means++ style initialization for better coverage
+fn kmeans_plus_plus_seed<R: Rng>(problem: &Problem, rng: &mut R) -> Array2<f64> {
+    let mut centers: Vec<[f64; 2]> = Vec::with_capacity(NUM_ORBS);
+    
+    // Pick first center weighted by population
+    let total_weight: f64 = problem.weights.sum();
+    let mut r = rng.gen::<f64>() * total_weight;
+    let mut idx0 = 0;
+    for i in 0..NUM_TOWNS {
+        r -= problem.weights[i];
+        if r <= 0.0 {
+            idx0 = i;
+            break;
+        }
+    }
+    centers.push([problem.towns[[idx0, 0]], problem.towns[[idx0, 1]]]);
+    
+    // Pick remaining centers with probability proportional to squared distance to nearest center
+    for _ in 1..NUM_ORBS {
+        let mut distances = vec![f64::MAX; NUM_TOWNS];
+        
+        // Calculate min distance to existing centers for each town
+        for i in 0..NUM_TOWNS {
+            let town = [problem.towns[[i, 0]], problem.towns[[i, 1]]];
+            let mut min_d_sq = f64::MAX;
+            for c in &centers {
+                let d_sq = (town[0] - c[0]).powi(2) + (town[1] - c[1]).powi(2);
+                if d_sq < min_d_sq {
+                    min_d_sq = d_sq;
+                }
+            }
+            // Weight by both distance and town weight
+            distances[i] = min_d_sq * problem.weights[i];
+        }
+        
+        // Pick next center with probability proportional to weighted distance
+        let total_dist: f64 = distances.iter().sum();
+        let mut r = rng.gen::<f64>() * total_dist;
+        let mut next_idx = 0;
+        
+        for i in 0..NUM_TOWNS {
+            r -= distances[i];
+            if r <= 0.0 {
+                next_idx = i;
+                break;
+            }
+        }
+        
+        let next_center = [problem.towns[[next_idx, 0]], problem.towns[[next_idx, 1]]];
+        
+        // Check min separation
+        let mut ok = true;
+        for c in &centers {
+            if distance(&next_center, c) < MIN_SEP {
+                ok = false;
+                break;
+            }
+        }
+        
+        if ok {
+            centers.push(next_center);
+        } else {
+            // Fallback: find nearest valid position
+            for _ in 0..100 {
+                let offset_x = rng.gen::<f64>() * 6.0 - 3.0;
+                let offset_y = rng.gen::<f64>() * 6.0 - 3.0;
+                let pos = [
+                    clip(next_center[0] + offset_x, 0.0, (GRID_N - 1) as f64),
+                    clip(next_center[1] + offset_y, 0.0, (GRID_N - 1) as f64),
+                ];
+                let mut valid = true;
+                for c in &centers {
+                    if distance(&pos, c) < MIN_SEP {
+                        valid = false;
+                        break;
+                    }
+                }
+                if valid {
+                    centers.push(pos);
+                    break;
+                }
+            }
+            if centers.len() < NUM_ORBS {
+                // Ultimate fallback
+                centers.push([
+                    rng.gen::<f64>() * (GRID_N - 1) as f64,
+                    rng.gen::<f64>() * (GRID_N - 1) as f64,
+                ]);
+            }
+        }
+    }
+    
+    let mut orbs = Array2::<f64>::zeros((NUM_ORBS, 2));
+    for i in 0..NUM_ORBS {
+        orbs[[i, 0]] = centers[i][0];
+        orbs[[i, 1]] = centers[i][1];
+    }
+    orbs
+}
+
+// Grid-based systematic placement
+fn grid_systematic_seed<R: Rng>(rng: &mut R) -> Array2<f64> {
+    // Create a systematic grid with some randomness
+    let mut positions = Vec::new();
+    
+    // Define grid spacing
+    let spacing = 5.5;
+    let offset = 2.0;
+    
+    for i in 0..4 {
+        for j in 0..4 {
+            let x = offset + i as f64 * spacing + rng.gen::<f64>() * 1.5 - 0.75;
+            let y = offset + j as f64 * spacing + rng.gen::<f64>() * 1.5 - 0.75;
+            if x >= 0.0 && x <= (GRID_N - 1) as f64 && y >= 0.0 && y <= (GRID_N - 1) as f64 {
+                positions.push([x, y]);
+            }
+        }
+    }
+    
+    // Shuffle and pick best NUM_ORBS positions
+    positions.shuffle(rng);
+    
+    let mut orbs = Array2::<f64>::zeros((NUM_ORBS, 2));
+    let mut selected = Vec::new();
+    
+    for pos in positions.iter() {
+        if selected.len() >= NUM_ORBS {
+            break;
+        }
+        
+        let mut ok = true;
+        for s in &selected {
+            if distance(pos, s) < MIN_SEP {
+                ok = false;
+                break;
+            }
+        }
+        
+        if ok {
+            selected.push(*pos);
+        }
+    }
+    
+    // Fill remaining if needed
+    while selected.len() < NUM_ORBS {
+        let pos = [
+            rng.gen::<f64>() * (GRID_N - 1) as f64,
+            rng.gen::<f64>() * (GRID_N - 1) as f64,
+        ];
+        let mut ok = true;
+        for s in &selected {
+            if distance(&pos, s) < MIN_SEP {
+                ok = false;
+                break;
+            }
+        }
+        if ok {
+            selected.push(pos);
+        }
+    }
+    
+    for i in 0..NUM_ORBS {
+        orbs[[i, 0]] = selected[i][0];
+        orbs[[i, 1]] = selected[i][1];
+    }
+    orbs
+}
+
+// Spiral placement for good coverage
+fn spiral_seed<R: Rng>(rng: &mut R) -> Array2<f64> {
+    let center_x = (GRID_N as f64 - 1.0) / 2.0;
+    let center_y = (GRID_N as f64 - 1.0) / 2.0;
+    
+    let mut orbs = Array2::<f64>::zeros((NUM_ORBS, 2));
+    let mut placed = Vec::new();
+    
+    for i in 0..NUM_ORBS {
+        let angle = i as f64 * 2.0 * std::f64::consts::PI / NUM_ORBS as f64;
+        let radius = 5.0 + i as f64 * 0.8 + rng.gen::<f64>() * 2.0;
+        
+        let mut x = center_x + radius * angle.cos();
+        let mut y = center_y + radius * angle.sin();
+        
+        // Clip to bounds
+        x = clip(x, 0.0, (GRID_N - 1) as f64);
+        y = clip(y, 0.0, (GRID_N - 1) as f64);
+        
+        // Project to maintain min separation
+        let pos = project_minsep(&orbs, i, [x, y], MIN_SEP);
+        orbs[[i, 0]] = pos[0];
+        orbs[[i, 1]] = pos[1];
+        placed.push(pos);
+    }
+    
+    orbs
+}
+
+// Weight density clustering - place orbs in high-weight regions
+fn weight_density_seed<R: Rng>(problem: &Problem, rng: &mut R) -> Array2<f64> {
+    // Find high-weight clusters
+    let mut weight_map = Array2::<f64>::zeros((GRID_N, GRID_N));
+    for i in 0..NUM_TOWNS {
+        let x = problem.towns[[i, 0]] as usize;
+        let y = problem.towns[[i, 1]] as usize;
+        weight_map[[x, y]] = problem.weights[i];
+    }
+    
+    // Apply Gaussian blur to find density clusters
+    let mut smooth_weights = weight_map.clone();
+    for x in 1..GRID_N-1 {
+        for y in 1..GRID_N-1 {
+            let mut sum = weight_map[[x, y]] * 4.0;
+            sum += weight_map[[x-1, y]] * 2.0;
+            sum += weight_map[[x+1, y]] * 2.0;
+            sum += weight_map[[x, y-1]] * 2.0;
+            sum += weight_map[[x, y+1]] * 2.0;
+            sum += weight_map[[x-1, y-1]];
+            sum += weight_map[[x+1, y-1]];
+            sum += weight_map[[x-1, y+1]];
+            sum += weight_map[[x+1, y+1]];
+            smooth_weights[[x, y]] = sum / 16.0;
+        }
+    }
+    
+    // Find top density regions
+    let mut candidates = Vec::new();
+    for x in 0..GRID_N {
+        for y in 0..GRID_N {
+            candidates.push((smooth_weights[[x, y]], [x as f64, y as f64]));
+        }
+    }
+    candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+    
+    // Place orbs in high-density regions with separation
+    let mut orbs = Array2::<f64>::zeros((NUM_ORBS, 2));
+    let mut placed = 0;
+    
+    for (_, pos) in candidates.iter() {
+        if placed >= NUM_ORBS {
+            break;
+        }
+        
+        // Add small random offset
+        let x = pos[0] + rng.gen::<f64>() * 0.5 - 0.25;
+        let y = pos[1] + rng.gen::<f64>() * 0.5 - 0.25;
+        let cand = [
+            clip(x, 0.0, (GRID_N - 1) as f64),
+            clip(y, 0.0, (GRID_N - 1) as f64),
+        ];
+        
+        // Check separation
+        let mut ok = true;
+        for j in 0..placed {
+            if distance(&cand, &[orbs[[j, 0]], orbs[[j, 1]]]) < MIN_SEP {
+                ok = false;
+                break;
+            }
+        }
+        
+        if ok {
+            orbs[[placed, 0]] = cand[0];
+            orbs[[placed, 1]] = cand[1];
+            placed += 1;
+        }
+    }
+    
+    orbs
+}
+
+// Load best positions from results.json as seeds
+fn historical_best_seed(idx: usize) -> Option<Array2<f64>> {
+    let results = ResultsFile::load();
+    if idx >= results.high_scores.len() {
+        return None;
+    }
+    
+    let score = &results.high_scores[idx];
+    let mut orbs = Array2::<f64>::zeros((NUM_ORBS, 2));
+    for i in 0..NUM_ORBS.min(score.coordinates.len()) {
+        orbs[[i, 0]] = score.coordinates[i].0;
+        orbs[[i, 1]] = score.coordinates[i].1;
+    }
+    Some(orbs)
+}
+
 fn weighted_farthest_seed<R: Rng>(
     problem: &Problem,
     rng: &mut R,
@@ -557,16 +842,63 @@ struct Result {
 fn search(problem: &Problem, max_outer: usize, seed_beam: usize, random_seed: u64, patience: usize) -> Result {
     let mut rng = StdRng::seed_from_u64(random_seed);
 
-    // Generate seeds
+    // Generate seeds with diverse strategies
     let mut seeds = Vec::new();
+    
+    // 1. Historical best positions from previous runs (if available)
+    for i in 0..3 {
+        if let Some(hist_seed) = historical_best_seed(i) {
+            seeds.push(hist_seed.clone());
+            // Add jittered version
+            let mut jittered = hist_seed;
+            let normal = Normal::new(0.0, 0.3).unwrap();
+            for j in 0..NUM_ORBS {
+                jittered[[j, 0]] += rng.sample(normal);
+                jittered[[j, 1]] += rng.sample(normal);
+                let pos = [
+                    clip(jittered[[j, 0]], 0.0, (GRID_N - 1) as f64),
+                    clip(jittered[[j, 1]], 0.0, (GRID_N - 1) as f64),
+                ];
+                let proj = project_minsep(&jittered, j, pos, MIN_SEP);
+                jittered[[j, 0]] = proj[0];
+                jittered[[j, 1]] = proj[1];
+            }
+            seeds.push(jittered);
+        }
+    }
+    
+    // 2. K-means++ for optimal coverage (20% of seeds)
+    let kmeans_count = (seed_beam as f64 * 0.2).ceil() as usize;
+    for _ in 0..kmeans_count {
+        seeds.push(kmeans_plus_plus_seed(problem, &mut rng));
+    }
+    
+    // 3. Weight density clustering (15% of seeds)
+    let density_count = (seed_beam as f64 * 0.15).ceil() as usize;
+    for _ in 0..density_count {
+        seeds.push(weight_density_seed(problem, &mut rng));
+    }
+    
+    // 4. Grid systematic placement (10% of seeds)
+    let grid_count = (seed_beam as f64 * 0.1).ceil() as usize;
+    for _ in 0..grid_count {
+        seeds.push(grid_systematic_seed(&mut rng));
+    }
+    
+    // 5. Spiral placement (5% of seeds)
+    let spiral_count = (seed_beam as f64 * 0.05).ceil() as usize;
+    for _ in 0..spiral_count {
+        seeds.push(spiral_seed(&mut rng));
+    }
 
-    // Edge-biased seed
+    // 6. Edge-biased seed and variations (10% of seeds)
     seeds.push(edge_biased_seed());
-
+    
     // Jittered edge-biased seeds
-    for _ in 0..4 {
+    let edge_variations = (seed_beam as f64 * 0.1).ceil() as usize;
+    for _ in 0..edge_variations.saturating_sub(1) {
         let mut s = edge_biased_seed();
-        let normal = Normal::new(0.0, 0.25).unwrap();
+        let normal = Normal::new(0.0, 0.35).unwrap();
         for i in 0..NUM_ORBS {
             let jx = rng.sample(normal);
             let jy = rng.sample(normal);
@@ -583,9 +915,9 @@ fn search(problem: &Problem, max_outer: usize, seed_beam: usize, random_seed: u6
         seeds.push(s);
     }
 
-    // Weighted farthest seeds - more trials for better quality
+    // 7. Weighted farthest seeds for remaining slots (40% of seeds)
     while seeds.len() < seed_beam {
-        seeds.push(weighted_farthest_seed(problem, &mut rng, 150));
+        seeds.push(weighted_farthest_seed(problem, &mut rng, 200));
     }
 
     // Rank seeds
