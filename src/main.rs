@@ -7,6 +7,7 @@ use std::f64::consts::E;
 use clap::Parser;
 use serde::Deserialize;
 use std::fs;
+use std::time::Instant;
 
 // ============================
 // CLI and Config
@@ -677,20 +678,26 @@ fn main() {
     let seeds_to_try: Vec<u64> = (1..=config.seeds as u64).map(|i| i * 1234 + i * i).collect();
     
     println!("Processing {} seeds in parallel ({} at a time)...\n", seeds_to_try.len(), config.parallel_chunks);
+    println!("Starting optimization... (this may take a while with large beam sizes)");
+    println!("Looking for scores > 3200.51...\n");
     
     // Process seeds in parallel chunks
     let chunk_size = config.parallel_chunks;
     let mut best_overall: Option<Result> = None;
     let mut seeds_processed = 0;
+    let start_time = Instant::now();
     
     for chunk in seeds_to_try.chunks(chunk_size) {
         let chunk_results: Vec<(usize, Result)> = chunk
             .par_iter()
             .enumerate()
             .map(|(chunk_idx, &seed)| {
+                let seed_start = Instant::now();
                 let result = search(&problem, config.iterations, config.beam_size, seed, config.patience);
+                let seed_duration = seed_start.elapsed();
                 let global_idx = seeds_processed + chunk_idx;
-                println!("  Seed {}/{} ({}): {:.6}", global_idx + 1, config.seeds, seed, result.value);
+                println!("  Seed {}/{} ({}): {:.6} | Time: {:.1}s", 
+                         global_idx + 1, config.seeds, seed, result.value, seed_duration.as_secs_f32());
                 
                 // Print coordinates for HIGH scores only (> 3200.51)
                 if result.value > 3200.51 {
@@ -715,12 +722,15 @@ fn main() {
             };
 
             if is_better {
-                println!("🔥 New best: {:.6}", value);
+                println!(">>> 🔥 NEW BEST: {:.6} <<<", value);
+                if value > 3200.50 && value <= 3200.51 {
+                    println!("    ⚠️  So close! Only {:.6} away from target!", 3200.51 - value);
+                }
                 best_overall = Some(result);
                 
                 // Early exit if we hit the target
                 if value > 3200.51 {
-                    println!("\n🎯 TARGET REACHED!");
+                    println!("\n🎯 TARGET REACHED! Score: {:.6}", value);
                     break;
                 }
             }
@@ -735,11 +745,32 @@ fn main() {
             }
         }
         
-        // Progress update every 100 seeds (or every 10 for test mode)
-        let update_freq = if config.seeds <= 100 { 10 } else { 100 };
-        if seeds_processed % update_freq == 0 {
+        // Progress update every 100 seeds (or every 10 for test mode, every 50 for large beams)
+        let update_freq = if config.seeds <= 100 { 
+            10 
+        } else if config.beam_size >= 500 { 
+            50 
+        } else { 
+            100 
+        };
+        
+        if seeds_processed % update_freq == 0 && seeds_processed > 0 {
+            let elapsed = start_time.elapsed();
+            let rate = seeds_processed as f32 / elapsed.as_secs_f32();
+            let eta = ((config.seeds - seeds_processed) as f32 / rate) as u64;
+            
             if let Some(ref best) = best_overall {
-                println!("Progress: {}/{} seeds, Current best: {:.6}", seeds_processed, config.seeds, best.value);
+                println!("\n=== PROGRESS UPDATE ===");
+                println!("  Seeds: {}/{} ({:.1}%)", seeds_processed, config.seeds, 
+                         (seeds_processed as f32 / config.seeds as f32) * 100.0);
+                println!("  Current best: {:.6}", best.value);
+                println!("  Time elapsed: {}m {}s", elapsed.as_secs() / 60, elapsed.as_secs() % 60);
+                println!("  Speed: {:.2} seeds/sec", rate);
+                println!("  ETA: ~{}m {}s", eta / 60, eta % 60);
+                if best.value > 3200.49 {
+                    println!("  Distance to target: {:.6}", 3200.51 - best.value);
+                }
+                println!();
             }
         }
     }
