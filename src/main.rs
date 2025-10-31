@@ -517,6 +517,11 @@ fn search(problem: &Problem, max_outer: usize, seed_beam: usize, random_seed: u6
     beam.sort_by(|a, b| b.value.partial_cmp(&a.value).unwrap());
     beam.truncate(seed_beam);
 
+    // Early stopping variables
+    let mut best_so_far = beam[0].value;
+    let mut no_improve_count = 0;
+    const EARLY_STOP_PATIENCE: usize = 10;
+
     // Outer improvement loop
     for iter in 0..max_outer {
         // Parallel improvement of beam members
@@ -570,9 +575,22 @@ fn search(problem: &Problem, max_outer: usize, seed_beam: usize, random_seed: u6
 
         beam = unique;
 
-        // Progress reporting every 25 iterations
-        if (iter + 1) % 25 == 0 {
-            println!("Iteration {}/{}: best = {:.6}", iter + 1, max_outer, beam[0].value);
+        // Check for improvement and early stopping
+        let improved = beam[0].value > best_so_far + 1e-9;
+        if improved {
+            best_so_far = beam[0].value;
+            no_improve_count = 0;
+            println!("  Iter {}: {:.6} ⬆️ IMPROVED", iter + 1, beam[0].value);
+        } else {
+            no_improve_count += 1;
+            println!("  Iter {}: {:.6} (no improve: {})", iter + 1, beam[0].value, no_improve_count);
+        }
+
+        // Early stopping
+        if no_improve_count >= EARLY_STOP_PATIENCE {
+            println!("✓ Early stopping at iteration {} (no improvement for {} iterations)", 
+                     iter + 1, EARLY_STOP_PATIENCE);
+            break;
         }
     }
 
@@ -592,19 +610,13 @@ fn main() {
     println!("Problem setup complete: {} towns, {} orbs", NUM_TOWNS, NUM_ORBS);
     println!("Target: 3200.51+\n");
 
-    // Try multiple random seeds and keep the best
-    let seeds_to_try = vec![
-        12345, 42, 7777, 99999, 54321, 11111, 88888, 33333,
-        1234, 5678, 9012, 3456, 7890, 2468, 1357, 9753,
-        111, 222, 333, 444, 555, 666, 777, 888, 999,
-        10101, 20202, 30303, 40404, 50505, 60606, 70707, 80808, 90909,
-        13579, 24680, 112358, 161803, 271828, 314159, 141421, 173205
-    ];
+    // Generate 1000 seeds for extensive exploration with early stopping
+    let seeds_to_try: Vec<u64> = (1..=1000).map(|i| i * 1234 + i * i).collect();
     let mut best_overall: Option<Result> = None;
 
     for (idx, seed) in seeds_to_try.iter().enumerate() {
         println!("=== Run {}/{} (seed={}) ===", idx + 1, seeds_to_try.len(), seed);
-        let result = search(&problem, 500, 24, *seed);
+        let result = search(&problem, 500, 50, *seed);
         let value = result.value;
         println!("Result: {:.6}", value);
         println!("Coordinates:");
