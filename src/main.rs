@@ -35,6 +35,8 @@ struct ConfigFile {
     local: Config,
     prod: Config,
     prod_ultra: Config,
+    prod_max: Config,
+    prod_mega: Config,
     test: Config,
 }
 
@@ -651,6 +653,8 @@ fn main() {
         "local" => config_file.local,
         "prod" => config_file.prod,
         "prod_ultra" => config_file.prod_ultra,
+        "prod_max" => config_file.prod_max,
+        "prod_mega" => config_file.prod_mega,
         "test" => config_file.test,
         _ => {
             eprintln!("Unknown config: {}. Using 'local'", args.config);
@@ -688,9 +692,9 @@ fn main() {
                 let global_idx = seeds_processed + chunk_idx;
                 println!("  Seed {}/{} ({}): {:.6}", global_idx + 1, config.seeds, seed, result.value);
                 
-                // Print coordinates for high scores
-                if result.value > 3200.49 {
-                    println!("    ⭐ HIGH SCORE! Coordinates:");
+                // Print coordinates for HIGH scores only (> 3200.51)
+                if result.value > 3200.51 {
+                    println!("    🎯 BREAKTHROUGH! Score: {:.6} - Coordinates:", result.value);
                     for i in 0..NUM_ORBS {
                         println!("      Orb {}: ({:.6}, {:.6})", i + 1, result.orbs[[i, 0]], result.orbs[[i, 1]]);
                     }

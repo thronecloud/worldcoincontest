@@ -25,6 +25,24 @@ patience = 8
 iterations = 300
 description = "Ultra mode - trades RAM for quality (uses ~4GB)"
 
+[prod_max]
+# EXTREME RAM usage - maximum quality
+beam_size = 500
+seeds = 1000
+parallel_chunks = 8
+patience = 5
+iterations = 200
+description = "MAX mode - uses ~8GB RAM for ultimate quality"
+
+[prod_mega]
+# MEGA RAM mode - for finding 3201+
+beam_size = 1000
+seeds = 500
+parallel_chunks = 4
+patience = 5
+iterations = 150
+description = "MEGA mode - uses ~16GB RAM (50% of 32GB)"
+
 [test]
 # Quick testing configuration
 beam_size = 20
