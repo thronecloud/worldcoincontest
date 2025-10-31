@@ -845,48 +845,57 @@ fn search(problem: &Problem, max_outer: usize, seed_beam: usize, random_seed: u6
     // Generate seeds with diverse strategies
     let mut seeds = Vec::new();
     
-    // 1. Historical best positions from previous runs (if available)
-    for i in 0..3 {
-        if let Some(hist_seed) = historical_best_seed(i) {
-            seeds.push(hist_seed.clone());
-            // Add jittered version
+    // 1. Historical best positions - DISABLED to prevent convergence
+    // Historical seeds were causing repeated 3200.496 scores
+    // Uncomment below to re-enable with strong perturbation
+    /*
+    if rng.gen::<f64>() < 0.3 {  // Only 30% chance to use historical
+        if let Some(hist_seed) = historical_best_seed(0) {
+            // Add strongly jittered version (not the exact historical)
             let mut jittered = hist_seed;
-            let normal = Normal::new(0.0, 0.3).unwrap();
-            for j in 0..NUM_ORBS {
-                jittered[[j, 0]] += rng.sample(normal);
-                jittered[[j, 1]] += rng.sample(normal);
+            let normal = Normal::new(0.0, 0.8).unwrap();  // Much stronger jitter
+            
+            // Perturb at least 3-5 orbs significantly
+            let orbs_to_perturb = rng.gen_range(3..=5);
+            let mut perturb_indices: Vec<usize> = (0..NUM_ORBS).collect();
+            perturb_indices.shuffle(&mut rng);
+            
+            for &idx in perturb_indices.iter().take(orbs_to_perturb) {
+                jittered[[idx, 0]] += rng.sample(normal) * 2.0;  // Stronger perturbation
+                jittered[[idx, 1]] += rng.sample(normal) * 2.0;
                 let pos = [
-                    clip(jittered[[j, 0]], 0.0, (GRID_N - 1) as f64),
-                    clip(jittered[[j, 1]], 0.0, (GRID_N - 1) as f64),
+                    clip(jittered[[idx, 0]], 0.0, (GRID_N - 1) as f64),
+                    clip(jittered[[idx, 1]], 0.0, (GRID_N - 1) as f64),
                 ];
-                let proj = project_minsep(&jittered, j, pos, MIN_SEP);
-                jittered[[j, 0]] = proj[0];
-                jittered[[j, 1]] = proj[1];
+                let proj = project_minsep(&jittered, idx, pos, MIN_SEP);
+                jittered[[idx, 0]] = proj[0];
+                jittered[[idx, 1]] = proj[1];
             }
             seeds.push(jittered);
         }
     }
+    */
     
-    // 2. K-means++ for optimal coverage (20% of seeds)
-    let kmeans_count = (seed_beam as f64 * 0.2).ceil() as usize;
+    // 2. K-means++ for optimal coverage (25% of seeds) - INCREASED
+    let kmeans_count = (seed_beam as f64 * 0.25).ceil() as usize;
     for _ in 0..kmeans_count {
         seeds.push(kmeans_plus_plus_seed(problem, &mut rng));
     }
     
-    // 3. Weight density clustering (15% of seeds)
-    let density_count = (seed_beam as f64 * 0.15).ceil() as usize;
+    // 3. Weight density clustering (20% of seeds) - INCREASED
+    let density_count = (seed_beam as f64 * 0.20).ceil() as usize;
     for _ in 0..density_count {
         seeds.push(weight_density_seed(problem, &mut rng));
     }
     
-    // 4. Grid systematic placement (10% of seeds)
-    let grid_count = (seed_beam as f64 * 0.1).ceil() as usize;
+    // 4. Grid systematic placement (15% of seeds) - INCREASED with variations
+    let grid_count = (seed_beam as f64 * 0.15).ceil() as usize;
     for _ in 0..grid_count {
         seeds.push(grid_systematic_seed(&mut rng));
     }
     
-    // 5. Spiral placement (5% of seeds)
-    let spiral_count = (seed_beam as f64 * 0.05).ceil() as usize;
+    // 5. Spiral placement (10% of seeds) - INCREASED
+    let spiral_count = (seed_beam as f64 * 0.10).ceil() as usize;
     for _ in 0..spiral_count {
         seeds.push(spiral_seed(&mut rng));
     }
@@ -894,30 +903,34 @@ fn search(problem: &Problem, max_outer: usize, seed_beam: usize, random_seed: u6
     // 6. Edge-biased seed and variations (10% of seeds)
     seeds.push(edge_biased_seed());
     
-    // Jittered edge-biased seeds
+    // Jittered edge-biased seeds with varying perturbation levels
     let edge_variations = (seed_beam as f64 * 0.1).ceil() as usize;
-    for _ in 0..edge_variations.saturating_sub(1) {
+    for i in 0..edge_variations.saturating_sub(1) {
         let mut s = edge_biased_seed();
-        let normal = Normal::new(0.0, 0.35).unwrap();
-        for i in 0..NUM_ORBS {
+        // Vary the perturbation strength
+        let jitter_strength = 0.2 + (i as f64 * 0.15 / edge_variations as f64);
+        let normal = Normal::new(0.0, jitter_strength).unwrap();
+        for j in 0..NUM_ORBS {
             let jx = rng.sample(normal);
             let jy = rng.sample(normal);
-            s[[i, 0]] += jx;
-            s[[i, 1]] += jy;
+            s[[j, 0]] += jx;
+            s[[j, 1]] += jy;
             let cand = [
-                clip(s[[i, 0]], 0.0, (GRID_N - 1) as f64),
-                clip(s[[i, 1]], 0.0, (GRID_N - 1) as f64),
+                clip(s[[j, 0]], 0.0, (GRID_N - 1) as f64),
+                clip(s[[j, 1]], 0.0, (GRID_N - 1) as f64),
             ];
-            let proj = project_minsep(&s, i, cand, MIN_SEP);
-            s[[i, 0]] = proj[0];
-            s[[i, 1]] = proj[1];
+            let proj = project_minsep(&s, j, cand, MIN_SEP);
+            s[[j, 0]] = proj[0];
+            s[[j, 1]] = proj[1];
         }
         seeds.push(s);
     }
 
-    // 7. Weighted farthest seeds for remaining slots (40% of seeds)
+    // 7. Weighted farthest seeds for remaining slots (20% of seeds) - More diverse
     while seeds.len() < seed_beam {
-        seeds.push(weighted_farthest_seed(problem, &mut rng, 200));
+        // Vary the trial count for diversity
+        let trials = 150 + rng.gen_range(0..150);
+        seeds.push(weighted_farthest_seed(problem, &mut rng, trials));
     }
 
     // Rank seeds
