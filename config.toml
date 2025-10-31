@@ -47,10 +47,10 @@ description = "MAX mode - uses ~8GB RAM for ultimate quality"
 # MEGA RAM mode - for finding 3201+
 beam_size = 1000
 seeds = 500
-parallel_chunks = 4
+parallel_chunks = 8
 patience = 5
 iterations = 150
-description = "MEGA mode - uses ~16GB RAM (50% of 32GB)"
+description = "MEGA mode - uses ~16GB RAM (50% of 32GB) - 8 cores"
 
 [test]
 # Quick testing configuration
