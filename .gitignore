@@ -22,3 +22,7 @@
 *.tmp
 *.temp
 
+# Results tracking
+results.json
+results*.txt
+
