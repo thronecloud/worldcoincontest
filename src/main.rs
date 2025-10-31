@@ -5,9 +5,11 @@ use rand_distr::Normal;
 use rayon::prelude::*;
 use std::f64::consts::E;
 use clap::Parser;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::time::Instant;
+use chrono::{DateTime, Utc};
+use std::path::Path;
 
 // ============================
 // CLI and Config
@@ -16,7 +18,7 @@ use std::time::Instant;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Configuration to use: local, prod, or test
+    /// Configuration to use: local, prod, test, or "view" to just see results
     #[arg(default_value = "local")]
     config: String,
 }
@@ -499,6 +501,49 @@ fn improve_once<R: Rng>(problem: &Problem, orbs: &Array2<f64>, rng: &mut R) -> (
 }
 
 // ============================
+// Results Tracking
+// ============================
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct HighScore {
+    score: f64,
+    coordinates: Vec<(f64, f64)>,
+    config: String,
+    seed: u64,
+    timestamp: DateTime<Utc>,
+    iterations_used: usize,
+    beam_size: usize,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ResultsFile {
+    high_scores: Vec<HighScore>,
+}
+
+impl ResultsFile {
+    fn load() -> Self {
+        if Path::new("results.json").exists() {
+            let content = fs::read_to_string("results.json").unwrap_or_else(|_| "{}".to_string());
+            serde_json::from_str(&content).unwrap_or_else(|_| ResultsFile { high_scores: Vec::new() })
+        } else {
+            ResultsFile { high_scores: Vec::new() }
+        }
+    }
+
+    fn add_score(&mut self, score: HighScore) {
+        self.high_scores.push(score);
+        // Sort by score descending
+        self.high_scores.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+    }
+
+    fn save(&self) -> std::io::Result<()> {
+        let json = serde_json::to_string_pretty(&self)?;
+        fs::write("results.json", json)?;
+        Ok(())
+    }
+}
+
+// ============================
 // Search
 // ============================
 
@@ -642,6 +687,26 @@ fn main() {
     // Parse command line arguments
     let args = Args::parse();
     
+    // Special case: just view results
+    if args.config == "view" {
+        println!("\n=== HIGH SCORES LEADERBOARD (from results.json) ===");
+        let results_file = ResultsFile::load();
+        if results_file.high_scores.is_empty() {
+            println!("No scores above 3200.49 recorded yet.");
+        } else {
+            for (i, score) in results_file.high_scores.iter().enumerate() {
+                println!("\n#{}: Score: {:.6}", i + 1, score.score);
+                println!("  Config: {} | Seed: {} | Beam: {}", 
+                         score.config, score.seed, score.beam_size);
+                println!("  Time: {}", score.timestamp.format("%Y-%m-%d %H:%M:%S UTC"));
+                println!("  Coordinates: {:?}", score.coordinates);
+            }
+            println!("\n🏆 Best score: {:.6}", results_file.high_scores[0].score);
+            println!("Total high scores recorded: {}", results_file.high_scores.len());
+        }
+        return;
+    }
+    
     println!("Orb Optimizer (Rust) — initializing...");
     
     // Load configuration
@@ -699,11 +764,37 @@ fn main() {
                 println!("  Seed {}/{} ({}): {:.6} | Time: {:.1}s", 
                          global_idx + 1, config.seeds, seed, result.value, seed_duration.as_secs_f32());
                 
-                // Print coordinates for HIGH scores only (> 3200.51)
-                if result.value > 3200.51 {
-                    println!("    🎯 BREAKTHROUGH! Score: {:.6} - Coordinates:", result.value);
-                    for i in 0..NUM_ORBS {
-                        println!("      Orb {}: ({:.6}, {:.6})", i + 1, result.orbs[[i, 0]], result.orbs[[i, 1]]);
+                // Save and print high scores (> 3200.49)
+                if result.value > 3200.49 {
+                    // Prepare coordinates in [(x,y), ...] format
+                    let coords: Vec<(f64, f64)> = (0..NUM_ORBS)
+                        .map(|i| (result.orbs[[i, 0]], result.orbs[[i, 1]]))
+                        .collect();
+                    
+                    // Create high score entry
+                    let high_score = HighScore {
+                        score: result.value,
+                        coordinates: coords.clone(),
+                        config: args.config.clone(),
+                        seed,
+                        timestamp: Utc::now(),
+                        iterations_used: 0, // Will be updated if we track this
+                        beam_size: config.beam_size,
+                    };
+                    
+                    // Load, add, and save
+                    let mut results_file = ResultsFile::load();
+                    results_file.add_score(high_score);
+                    if let Err(e) = results_file.save() {
+                        eprintln!("Failed to save to results.json: {}", e);
+                    } else {
+                        println!("    💾 Saved to results.json!");
+                    }
+                    
+                    // Print for scores > 3200.51
+                    if result.value > 3200.51 {
+                        println!("    🎯 BREAKTHROUGH! Score: {:.6}", result.value);
+                        println!("    Coordinates: {:?}", coords);
                     }
                 }
                 
@@ -787,6 +878,24 @@ fn main() {
     println!("\nOrb coordinates (x, y):");
     for i in 0..NUM_ORBS {
         println!("({:.6}, {:.6})", result.orbs[[i, 0]], result.orbs[[i, 1]]);
+    }
+    
+    // Display current high scores from results.json
+    println!("\n=== HIGH SCORES LEADERBOARD (from results.json) ===");
+    let results_file = ResultsFile::load();
+    if results_file.high_scores.is_empty() {
+        println!("No scores above 3200.49 recorded yet.");
+    } else {
+        for (i, score) in results_file.high_scores.iter().take(10).enumerate() {
+            println!("#{}: {:.6} | Config: {} | Seed: {} | {}", 
+                     i + 1, score.score, score.config, score.seed, 
+                     score.timestamp.format("%Y-%m-%d %H:%M:%S UTC"));
+            if i == 0 {
+                // Show coordinates for the best score
+                println!("  Best coordinates: {:?}", score.coordinates);
+            }
+        }
+        println!("\nTotal high scores recorded: {}", results_file.high_scores.len());
     }
 }
 
