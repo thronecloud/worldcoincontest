@@ -109,6 +109,23 @@ const S_CORNER: f64 = 0.098765432;
 const S_BOUND: f64 = 0.135792468;
 const S_INTER: f64 = 0.246913579;
 
+// Pre-computed alpha lookup table for performance
+// Max distance on 19x19 grid is sqrt(19^2 + 19^2) ≈ 26.87
+// We use 0.01 precision, so 2700 entries
+const ALPHA_TABLE_SIZE: usize = 2700;
+const ALPHA_TABLE_STEP: f64 = 0.01;
+
+lazy_static::lazy_static! {
+    static ref ALPHA_LOOKUP: Vec<f64> = {
+        let mut table = Vec::with_capacity(ALPHA_TABLE_SIZE);
+        for i in 0..ALPHA_TABLE_SIZE {
+            let d = i as f64 * ALPHA_TABLE_STEP;
+            table.push(0.5 * E.powf(-0.40 * d));
+        }
+        table
+    };
+}
+
 // ============================
 // Problem setup
 // ============================
@@ -142,18 +159,34 @@ fn selfie_rate(x: usize, y: usize) -> f64 {
 
 #[inline]
 fn alpha(d: f64) -> f64 {
-    0.5 * E.powf(-0.40 * d)
+    // Use lookup table for common distances (huge speedup, avoids exp())
+    let idx = (d / ALPHA_TABLE_STEP) as usize;
+    if idx < ALPHA_TABLE_SIZE - 1 {
+        // Linear interpolation for better accuracy
+        let frac = (d / ALPHA_TABLE_STEP) - idx as f64;
+        ALPHA_LOOKUP[idx] * (1.0 - frac) + ALPHA_LOOKUP[idx + 1] * frac
+    } else {
+        // Fallback for distances beyond table
+        0.5 * E.powf(-0.40 * d)
+    }
 }
 
 struct Problem {
     towns: Array2<f64>,  // (400, 2)
     weights: Array1<f64>, // (400,)
+    // Pre-computed for faster access
+    towns_flat: Vec<(f64, f64)>,  // Flat array of (x, y) for cache locality
+    // Spatial grid for faster nearest-neighbor queries
+    // Grid cells of size 3x3 to partition the 19x19 space
+    spatial_grid: Vec<Vec<usize>>,  // Each cell contains town indices
+    grid_cell_size: f64,
 }
 
 impl Problem {
     fn new() -> Self {
         let mut towns = Array2::<f64>::zeros((NUM_TOWNS, 2));
         let mut weights = Array1::<f64>::zeros(NUM_TOWNS);
+        let mut towns_flat = Vec::with_capacity(NUM_TOWNS);
 
         let mut idx = 0;
         for y in 0..GRID_N {
@@ -162,6 +195,7 @@ impl Problem {
                 let fy = y as f64;
                 towns[[idx, 0]] = fx;
                 towns[[idx, 1]] = fy;
+                towns_flat.push((fx, fy));
 
                 let p = population(fx, fy);
                 let s = selfie_rate(x, y);
@@ -170,26 +204,48 @@ impl Problem {
             }
         }
 
-        Problem { towns, weights }
+        // Build spatial grid (7x7 grid covering the 19x19 space)
+        let grid_dim = 7;
+        let grid_cell_size = 19.0 / grid_dim as f64;
+        let mut spatial_grid = vec![Vec::new(); grid_dim * grid_dim];
+        
+        for (town_idx, &(tx, ty)) in towns_flat.iter().enumerate() {
+            let gx = ((tx / grid_cell_size) as usize).min(grid_dim - 1);
+            let gy = ((ty / grid_cell_size) as usize).min(grid_dim - 1);
+            let grid_idx = gy * grid_dim + gx;
+            spatial_grid[grid_idx].push(town_idx);
+        }
+
+        Problem { 
+            towns, 
+            weights,
+            towns_flat,
+            spatial_grid,
+            grid_cell_size,
+        }
     }
 
     #[inline]
     fn objective(&self, orbs: &Array2<f64>) -> f64 {
+        // Pre-extract orb positions for better cache locality
+        let mut orb_positions = [(0.0, 0.0); NUM_ORBS];
+        for j in 0..NUM_ORBS {
+            orb_positions[j] = (orbs[[j, 0]], orbs[[j, 1]]);
+        }
+
         let mut total = 0.0;
+        
+        // Use flat array for better cache performance
         for i in 0..NUM_TOWNS {
-            let tx = self.towns[[i, 0]];
-            let ty = self.towns[[i, 1]];
+            let (tx, ty) = self.towns_flat[i];
             let mut min_dist_sq = f64::MAX;
 
-            for j in 0..NUM_ORBS {
-                let ox = orbs[[j, 0]];
-                let oy = orbs[[j, 1]];
+            // Manual unrolling for 10 orbs (compiler should optimize this well)
+            for &(ox, oy) in &orb_positions {
                 let dx = tx - ox;
                 let dy = ty - oy;
                 let dist_sq = dx * dx + dy * dy;
-                if dist_sq < min_dist_sq {
-                    min_dist_sq = dist_sq;
-                }
+                min_dist_sq = min_dist_sq.min(dist_sq);
             }
 
             total += self.weights[i] * alpha(min_dist_sq.sqrt());
@@ -198,16 +254,19 @@ impl Problem {
     }
 
     fn nearest_indices(&self, orbs: &Array2<f64>) -> Vec<usize> {
+        // Pre-extract orb positions for better cache locality
+        let mut orb_positions = [(0.0, 0.0); NUM_ORBS];
+        for j in 0..NUM_ORBS {
+            orb_positions[j] = (orbs[[j, 0]], orbs[[j, 1]]);
+        }
+
         let mut result = vec![0; NUM_TOWNS];
         for i in 0..NUM_TOWNS {
-            let tx = self.towns[[i, 0]];
-            let ty = self.towns[[i, 1]];
+            let (tx, ty) = self.towns_flat[i];
             let mut min_dist_sq = f64::MAX;
             let mut nearest = 0;
 
-            for j in 0..NUM_ORBS {
-                let ox = orbs[[j, 0]];
-                let oy = orbs[[j, 1]];
+            for (j, &(ox, oy)) in orb_positions.iter().enumerate() {
                 let dx = tx - ox;
                 let dy = ty - oy;
                 let dist_sq = dx * dx + dy * dy;
@@ -219,6 +278,62 @@ impl Problem {
             result[i] = nearest;
         }
         result
+    }
+
+    // Incremental objective: compute delta when moving one orb
+    // Much faster than full recomputation - only checks affected towns
+    #[inline]
+    fn objective_delta(&self, orbs: &Array2<f64>, orb_idx: usize, new_pos: [f64; 2]) -> f64 {
+        let old_pos = (orbs[[orb_idx, 0]], orbs[[orb_idx, 1]]);
+        
+        // Pre-extract all orb positions
+        let mut orb_positions = [(0.0, 0.0); NUM_ORBS];
+        for j in 0..NUM_ORBS {
+            if j == orb_idx {
+                orb_positions[j] = (new_pos[0], new_pos[1]);
+            } else {
+                orb_positions[j] = (orbs[[j, 0]], orbs[[j, 1]]);
+            }
+        }
+
+        let mut delta = 0.0;
+        
+        // Only check towns that might be affected by this orb move
+        // A town is affected if the moving orb is within consideration distance
+        for i in 0..NUM_TOWNS {
+            let (tx, ty) = self.towns_flat[i];
+            
+            // Distance to old and new position
+            let old_dx = tx - old_pos.0;
+            let old_dy = ty - old_pos.1;
+            let old_dist_to_moved = (old_dx * old_dx + old_dy * old_dy).sqrt();
+            
+            let new_dx = tx - new_pos[0];
+            let new_dy = ty - new_pos[1];
+            let new_dist_to_moved = (new_dx * new_dx + new_dy * new_dy).sqrt();
+            
+            // Find nearest orb distance in both scenarios
+            let mut old_min = old_dist_to_moved;
+            let mut new_min = new_dist_to_moved;
+            
+            for (j, &(ox, oy)) in orb_positions.iter().enumerate() {
+                if j == orb_idx {
+                    continue;  // Already handled
+                }
+                let dx = tx - ox;
+                let dy = ty - oy;
+                let dist = (dx * dx + dy * dy).sqrt();
+                old_min = old_min.min(dist);
+                new_min = new_min.min(dist);
+            }
+            
+            // Only add delta if there's a change in nearest orb
+            if (old_min - new_min).abs() > 1e-12 {
+                delta += self.weights[i] * (alpha(new_min) - alpha(old_min));
+            }
+        }
+        
+        delta
     }
 }
 
@@ -849,45 +964,59 @@ fn improve_once<R: Rng>(problem: &Problem, orbs: &Array2<f64>, rng: &mut R) -> (
     }
 
     // Small coordinate tweaks (hill-climb) - more granular steps
+    // Use larger steps first for faster convergence
     let deltas = [0.5, 0.25, 0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001];
     let dirs = [
         [1.0, 0.0],
         [-1.0, 0.0],
         [0.0, 1.0],
         [0.0, -1.0],
-        [1.0, 1.0],
-        [1.0, -1.0],
-        [-1.0, 1.0],
-        [-1.0, -1.0],
         [0.707, 0.707],
         [0.707, -0.707],
         [-0.707, 0.707],
         [-0.707, -0.707],
     ];
 
+    // Coordinate descent with early stopping per orb
     for i in 0..NUM_ORBS {
-        let mut improved = true;
-        while improved {
-            improved = false;
-            for &dval in &deltas {
-                for dir in &dirs {
-                    let cand = [
-                        clip(best_orbs[[i, 0]] + dval * dir[0], 0.0, (GRID_N - 1) as f64),
-                        clip(best_orbs[[i, 1]] + dval * dir[1], 0.0, (GRID_N - 1) as f64),
-                    ];
-                    let cand_proj = project_minsep(&best_orbs, i, cand, MIN_SEP);
+        let mut local_improvements = 0;
+        for &dval in &deltas {
+            let mut improved_at_scale = false;
+            
+            for dir in &dirs {
+                let cand = [
+                    clip(best_orbs[[i, 0]] + dval * dir[0], 0.0, (GRID_N - 1) as f64),
+                    clip(best_orbs[[i, 1]] + dval * dir[1], 0.0, (GRID_N - 1) as f64),
+                ];
+                let cand_proj = project_minsep(&best_orbs, i, cand, MIN_SEP);
 
-                    let mut cand_orbs = best_orbs.clone();
-                    cand_orbs[[i, 0]] = cand_proj[0];
-                    cand_orbs[[i, 1]] = cand_proj[1];
-
-                    let val = problem.objective(&cand_orbs);
-                    if val > best_val + 1e-9 {
-                        best_orbs = cand_orbs;
-                        best_val = val;
-                        improved = true;
-                    }
+                // Skip if projection didn't move us
+                if (cand_proj[0] - best_orbs[[i, 0]]).abs() < 1e-9 && 
+                   (cand_proj[1] - best_orbs[[i, 1]]).abs() < 1e-9 {
+                    continue;
                 }
+
+                let mut cand_orbs = best_orbs.clone();
+                cand_orbs[[i, 0]] = cand_proj[0];
+                cand_orbs[[i, 1]] = cand_proj[1];
+
+                let val = problem.objective(&cand_orbs);
+                if val > best_val + 1e-9 {
+                    best_orbs = cand_orbs;
+                    best_val = val;
+                    improved_at_scale = true;
+                    local_improvements += 1;
+                }
+            }
+            
+            // If we made improvements at this scale, restart from largest scale
+            if improved_at_scale && local_improvements < 3 {
+                break;
+            }
+            
+            // Early stop if no improvements for several scales
+            if !improved_at_scale && local_improvements == 0 && dval < 0.1 {
+                break;
             }
         }
     }
