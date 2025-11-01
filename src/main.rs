@@ -1461,7 +1461,7 @@ fn main() {
         println!("\n=== HIGH SCORES LEADERBOARD (from results.json) ===");
         let results_file = ResultsFile::load();
         if results_file.high_scores.is_empty() {
-            println!("No scores above 3200.49 recorded yet.");
+            println!("No scores above 3200.5 recorded yet.");
         } else {
             for (i, score) in results_file.high_scores.iter().enumerate() {
                 println!("\n#{}: Score: {:.6}", i + 1, score.score);
@@ -1534,8 +1534,8 @@ fn main() {
                 log_info!("  Seed {}/{} ({}): {:.6} | Time: {:.1}s", 
                          global_idx + 1, config.seeds, seed, result.value, seed_duration.as_secs_f32());
                 
-                // Save and print high scores (> 3200.49)
-                if result.value > 3200.49 {
+                // Save and print high scores (> 3200.5)
+                if result.value > 3200.5 {
                     // Prepare coordinates in [(x,y), ...] format
                     let coords: Vec<(f64, f64)> = (0..NUM_ORBS)
                         .map(|i| (result.orbs[[i, 0]], result.orbs[[i, 1]]))
@@ -1628,7 +1628,7 @@ fn main() {
                 log_info!("  Time elapsed: {}m {}s", elapsed.as_secs() / 60, elapsed.as_secs() % 60);
                 log_info!("  Speed: {:.2} seeds/sec", rate);
                 log_info!("  ETA: ~{}m {}s", eta / 60, eta % 60);
-                if best.value > 3200.49 {
+                if best.value > 3200.5 {
                     log_info!("  Distance to target: {:.6}", 3200.51 - best.value);
                 }
                 log_info!("");
@@ -1654,7 +1654,7 @@ fn main() {
     log_info!("\n=== HIGH SCORES LEADERBOARD (from results.json) ===");
     let results_file = ResultsFile::load();
     if results_file.high_scores.is_empty() {
-        log_info!("No scores above 3200.49 recorded yet.");
+        log_info!("No scores above 3200.5 recorded yet.");
     } else {
         for (i, score) in results_file.high_scores.iter().take(10).enumerate() {
             log_info!("#{}: {:.6} | Config: {} | Seed: {} | {}", 
