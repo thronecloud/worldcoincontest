@@ -873,7 +873,129 @@ fn adaptive_perturbation<R: Rng>(
     perturbed
 }
 
-fn improve_once<R: Rng>(problem: &Problem, orbs: &Array2<f64>, rng: &mut R) -> (Array2<f64>, f64) {
+// Multi-orb coordinated optimization - jointly optimize 2 orbs
+fn optimize_two_orbs<R: Rng>(problem: &Problem, orbs: &Array2<f64>, orb_i: usize, orb_j: usize, _rng: &mut R) -> (Array2<f64>, f64) {
+    let mut best_orbs = orbs.clone();
+    let mut best_val = problem.objective(&best_orbs);
+    
+    // Try small coordinated moves
+    let deltas = [0.3, 0.2, 0.1, 0.05, 0.02];
+    let dirs = [[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]];
+    
+    for &d1 in &deltas {
+        for &d2 in &deltas {
+            for dir1 in &dirs {
+                for dir2 in &dirs {
+                    let cand_i = [
+                        clip(best_orbs[[orb_i, 0]] + d1 * dir1[0], 0.0, (GRID_N - 1) as f64),
+                        clip(best_orbs[[orb_i, 1]] + d1 * dir1[1], 0.0, (GRID_N - 1) as f64),
+                    ];
+                    let cand_j = [
+                        clip(best_orbs[[orb_j, 0]] + d2 * dir2[0], 0.0, (GRID_N - 1) as f64),
+                        clip(best_orbs[[orb_j, 1]] + d2 * dir2[1], 0.0, (GRID_N - 1) as f64),
+                    ];
+                    
+                    let mut cand_orbs = best_orbs.clone();
+                    cand_orbs[[orb_i, 0]] = cand_i[0];
+                    cand_orbs[[orb_i, 1]] = cand_i[1];
+                    cand_orbs[[orb_j, 0]] = cand_j[0];
+                    cand_orbs[[orb_j, 1]] = cand_j[1];
+                    
+                    // Check constraints
+                    let proj_i = project_minsep(&cand_orbs, orb_i, cand_i, MIN_SEP);
+                    cand_orbs[[orb_i, 0]] = proj_i[0];
+                    cand_orbs[[orb_i, 1]] = proj_i[1];
+                    
+                    let proj_j = project_minsep(&cand_orbs, orb_j, cand_j, MIN_SEP);
+                    cand_orbs[[orb_j, 0]] = proj_j[0];
+                    cand_orbs[[orb_j, 1]] = proj_j[1];
+                    
+                    let val = problem.objective(&cand_orbs);
+                    if val > best_val + 1e-9 {
+                        best_orbs = cand_orbs;
+                        best_val = val;
+                    }
+                }
+            }
+        }
+    }
+    
+    (best_orbs, best_val)
+}
+
+// Swap two orbs positions
+fn swap_orbs<R: Rng>(problem: &Problem, orbs: &Array2<f64>, rng: &mut R) -> (Array2<f64>, f64) {
+    let best_orbs = orbs.clone();
+    let best_val = problem.objective(&best_orbs);
+    
+    // Try swapping random pairs
+    for _ in 0..5 {
+        let i = rng.gen_range(0..NUM_ORBS);
+        let j = rng.gen_range(0..NUM_ORBS);
+        if i == j {
+            continue;
+        }
+        
+        let mut cand_orbs = orbs.clone();
+        let temp_x = cand_orbs[[i, 0]];
+        let temp_y = cand_orbs[[i, 1]];
+        cand_orbs[[i, 0]] = cand_orbs[[j, 0]];
+        cand_orbs[[i, 1]] = cand_orbs[[j, 1]];
+        cand_orbs[[j, 0]] = temp_x;
+        cand_orbs[[j, 1]] = temp_y;
+        
+        let val = problem.objective(&cand_orbs);
+        if val > best_val + 1e-9 {
+            return (cand_orbs, val);
+        }
+    }
+    
+    (best_orbs, best_val)
+}
+
+// Continuous refinement with very fine adjustments
+fn continuous_refinement(problem: &Problem, orbs: &Array2<f64>) -> (Array2<f64>, f64) {
+    let mut best_orbs = orbs.clone();
+    let mut best_val = problem.objective(&best_orbs);
+    
+    // Ultra-fine adjustments
+    let fine_deltas = [0.005, 0.002, 0.001, 0.0005];
+    let dirs = [
+        [1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0],
+        [0.707, 0.707], [0.707, -0.707], [-0.707, 0.707], [-0.707, -0.707],
+    ];
+    
+    for orb_idx in 0..NUM_ORBS {
+        for &delta in &fine_deltas {
+            let mut improved = false;
+            for dir in &dirs {
+                let cand = [
+                    clip(best_orbs[[orb_idx, 0]] + delta * dir[0], 0.0, (GRID_N - 1) as f64),
+                    clip(best_orbs[[orb_idx, 1]] + delta * dir[1], 0.0, (GRID_N - 1) as f64),
+                ];
+                let cand_proj = project_minsep(&best_orbs, orb_idx, cand, MIN_SEP);
+                
+                let mut cand_orbs = best_orbs.clone();
+                cand_orbs[[orb_idx, 0]] = cand_proj[0];
+                cand_orbs[[orb_idx, 1]] = cand_proj[1];
+                
+                let val = problem.objective(&cand_orbs);
+                if val > best_val + 1e-12 {  // Even smaller threshold
+                    best_orbs = cand_orbs;
+                    best_val = val;
+                    improved = true;
+                }
+            }
+            if !improved {
+                break;  // No improvement at this scale, don't try finer
+            }
+        }
+    }
+    
+    (best_orbs, best_val)
+}
+
+fn improve_once<R: Rng>(problem: &Problem, orbs: &Array2<f64>, rng: &mut R, iteration: usize, max_iterations: usize) -> (Array2<f64>, f64) {
     let mut best_orbs = orbs.clone();
     let mut best_val = problem.objective(&best_orbs);
 
@@ -900,7 +1022,7 @@ fn improve_once<R: Rng>(problem: &Problem, orbs: &Array2<f64>, rng: &mut R) -> (
         let mut momentum_x = 0.0;
         let mut momentum_y = 0.0;
         let momentum_decay = 0.9;
-        let mut learning_rate = 0.8;  // Increased initial learning rate
+        let mut learning_rate: f64 = 0.8;  // Increased initial learning rate
         
         for iter in 0..20 {  // More iterations
             let mut grad_x = 0.0;
@@ -915,17 +1037,26 @@ fn improve_once<R: Rng>(problem: &Problem, orbs: &Array2<f64>, rng: &mut R) -> (
                 grad_y += coeff * dy;
             }
 
-            if grad_x.abs() < 1e-12 && grad_y.abs() < 1e-12 {
+            let grad_norm = (grad_x * grad_x + grad_y * grad_y).sqrt();
+            if grad_norm < 1e-12 {
                 break;
+            }
+            
+            // Adaptive learning rate based on gradient magnitude
+            if grad_norm < 0.01 {
+                learning_rate *= 0.8;  // Reduce when gradient is small (near optimum)
+            } else if grad_norm > 1.0 {
+                learning_rate *= 1.1;  // Increase when gradient is large (far from optimum)
+                learning_rate = learning_rate.min(1.5_f64);  // Cap at 1.5
             }
             
             // Apply momentum
             momentum_x = momentum_decay * momentum_x - learning_rate * grad_x;
             momentum_y = momentum_decay * momentum_y - learning_rate * grad_y;
             
-            // Adaptive learning rate
+            // Decay learning rate over iterations
             if iter > 10 {
-                learning_rate *= 0.95;  // Decay learning rate
+                learning_rate *= 0.95;
             }
 
             let mut step_x = momentum_x;
@@ -1021,7 +1152,10 @@ fn improve_once<R: Rng>(problem: &Problem, orbs: &Array2<f64>, rng: &mut R) -> (
         }
     }
 
-    // Multi-orb shake with simulated annealing acceptance
+    // Multi-orb shake with temperature-scheduled simulated annealing
+    let temperature = 1.0 - (iteration as f64 / max_iterations as f64);  // Cool down over time
+    let acceptance_prob = 0.3 * temperature;  // More accepting early, less later
+    
     if rng.gen::<f64>() < 0.2 {
         let num_shakes = rng.gen_range(1..=2);
         let normal = Normal::new(0.0, 1.2).unwrap();
@@ -1040,10 +1174,43 @@ fn improve_once<R: Rng>(problem: &Problem, orbs: &Array2<f64>, rng: &mut R) -> (
         }
 
         let val = problem.objective(&cand_orbs);
-        // Accept if better, or occasionally accept slightly worse (simulated annealing)
-        if val > best_val || (val > best_val - 0.5 && rng.gen::<f64>() < 0.1) {
+        // Temperature-scheduled acceptance: more accepting early, less later
+        let energy_diff = best_val - val;
+        let accept = val > best_val || (energy_diff < 2.0 && rng.gen::<f64>() < acceptance_prob);
+        if accept {
             best_orbs = cand_orbs;
             best_val = val;
+        }
+    }
+    
+    // NEW: Multi-orb coordinated optimization (20% chance)
+    if rng.gen::<f64>() < 0.2 {
+        let orb_i = rng.gen_range(0..NUM_ORBS);
+        let orb_j = rng.gen_range(0..NUM_ORBS);
+        if orb_i != orb_j {
+            let (new_orbs, new_val) = optimize_two_orbs(problem, &best_orbs, orb_i, orb_j, rng);
+            if new_val > best_val {
+                best_orbs = new_orbs;
+                best_val = new_val;
+            }
+        }
+    }
+    
+    // NEW: Try swapping orbs (10% chance)
+    if rng.gen::<f64>() < 0.1 {
+        let (new_orbs, new_val) = swap_orbs(problem, &best_orbs, rng);
+        if new_val > best_val {
+            best_orbs = new_orbs;
+            best_val = new_val;
+        }
+    }
+    
+    // NEW: Continuous refinement in later iterations (when close to optimum)
+    if iteration > max_iterations / 2 {
+        let (refined_orbs, refined_val) = continuous_refinement(problem, &best_orbs);
+        if refined_val > best_val {
+            best_orbs = refined_orbs;
+            best_val = refined_val;
         }
     }
 
@@ -1223,7 +1390,7 @@ fn search(problem: &Problem, max_outer: usize, seed_beam: usize, random_seed: u6
             .par_iter()
             .map(|r| {
                 let mut local_rng = StdRng::seed_from_u64(random_seed + iter as u64 + 1);
-                improve_once(problem, &r.orbs, &mut local_rng)
+                improve_once(problem, &r.orbs, &mut local_rng, iter, max_outer)
             })
             .collect();
 
@@ -1371,7 +1538,7 @@ fn search(problem: &Problem, max_outer: usize, seed_beam: usize, random_seed: u6
                 .par_iter()
                 .map(|r| {
                     let mut local_rng = StdRng::seed_from_u64(random_seed + 5000 + iter as u64);
-                    improve_once(problem, &r.orbs, &mut local_rng)
+                    improve_once(problem, &r.orbs, &mut local_rng, iter, 20)
                 })
                 .collect();
             
