@@ -109,22 +109,8 @@ const S_CORNER: f64 = 0.098765432;
 const S_BOUND: f64 = 0.135792468;
 const S_INTER: f64 = 0.246913579;
 
-// Pre-computed alpha lookup table for performance
-// Max distance on 19x19 grid is sqrt(19^2 + 19^2) ≈ 26.87
-// We use 0.01 precision, so 2700 entries
-const ALPHA_TABLE_SIZE: usize = 2700;
-const ALPHA_TABLE_STEP: f64 = 0.01;
-
-lazy_static::lazy_static! {
-    static ref ALPHA_LOOKUP: Vec<f64> = {
-        let mut table = Vec::with_capacity(ALPHA_TABLE_SIZE);
-        for i in 0..ALPHA_TABLE_SIZE {
-            let d = i as f64 * ALPHA_TABLE_STEP;
-            table.push(0.5 * E.powf(-0.40 * d));
-        }
-        table
-    };
-}
+// Removed lookup table - using exact formula to match challenge server exactly
+// Even tiny approximation errors are unacceptable for score validation
 
 // ============================
 // Problem setup
@@ -159,16 +145,9 @@ fn selfie_rate(x: usize, y: usize) -> f64 {
 
 #[inline]
 fn alpha(d: f64) -> f64 {
-    // Use lookup table for common distances (huge speedup, avoids exp())
-    let idx = (d / ALPHA_TABLE_STEP) as usize;
-    if idx < ALPHA_TABLE_SIZE - 1 {
-        // Linear interpolation for better accuracy
-        let frac = (d / ALPHA_TABLE_STEP) - idx as f64;
-        ALPHA_LOOKUP[idx] * (1.0 - frac) + ALPHA_LOOKUP[idx + 1] * frac
-    } else {
-        // Fallback for distances beyond table
-        0.5 * E.powf(-0.40 * d)
-    }
+    // EXACT formula - must match challenge server exactly
+    // α(d) = 0.50 × e^(-0.40×d)
+    0.5 * E.powf(-0.40 * d)
 }
 
 struct Problem {
@@ -176,10 +155,6 @@ struct Problem {
     weights: Array1<f64>, // (400,)
     // Pre-computed for faster access
     towns_flat: Vec<(f64, f64)>,  // Flat array of (x, y) for cache locality
-    // Spatial grid for faster nearest-neighbor queries
-    // Grid cells of size 3x3 to partition the 19x19 space
-    spatial_grid: Vec<Vec<usize>>,  // Each cell contains town indices
-    grid_cell_size: f64,
 }
 
 impl Problem {
@@ -204,24 +179,10 @@ impl Problem {
             }
         }
 
-        // Build spatial grid (7x7 grid covering the 19x19 space)
-        let grid_dim = 7;
-        let grid_cell_size = 19.0 / grid_dim as f64;
-        let mut spatial_grid = vec![Vec::new(); grid_dim * grid_dim];
-        
-        for (town_idx, &(tx, ty)) in towns_flat.iter().enumerate() {
-            let gx = ((tx / grid_cell_size) as usize).min(grid_dim - 1);
-            let gy = ((ty / grid_cell_size) as usize).min(grid_dim - 1);
-            let grid_idx = gy * grid_dim + gx;
-            spatial_grid[grid_idx].push(town_idx);
-        }
-
         Problem { 
             towns, 
             weights,
             towns_flat,
-            spatial_grid,
-            grid_cell_size,
         }
     }
 
@@ -280,61 +241,6 @@ impl Problem {
         result
     }
 
-    // Incremental objective: compute delta when moving one orb
-    // Much faster than full recomputation - only checks affected towns
-    #[inline]
-    fn objective_delta(&self, orbs: &Array2<f64>, orb_idx: usize, new_pos: [f64; 2]) -> f64 {
-        let old_pos = (orbs[[orb_idx, 0]], orbs[[orb_idx, 1]]);
-        
-        // Pre-extract all orb positions
-        let mut orb_positions = [(0.0, 0.0); NUM_ORBS];
-        for j in 0..NUM_ORBS {
-            if j == orb_idx {
-                orb_positions[j] = (new_pos[0], new_pos[1]);
-            } else {
-                orb_positions[j] = (orbs[[j, 0]], orbs[[j, 1]]);
-            }
-        }
-
-        let mut delta = 0.0;
-        
-        // Only check towns that might be affected by this orb move
-        // A town is affected if the moving orb is within consideration distance
-        for i in 0..NUM_TOWNS {
-            let (tx, ty) = self.towns_flat[i];
-            
-            // Distance to old and new position
-            let old_dx = tx - old_pos.0;
-            let old_dy = ty - old_pos.1;
-            let old_dist_to_moved = (old_dx * old_dx + old_dy * old_dy).sqrt();
-            
-            let new_dx = tx - new_pos[0];
-            let new_dy = ty - new_pos[1];
-            let new_dist_to_moved = (new_dx * new_dx + new_dy * new_dy).sqrt();
-            
-            // Find nearest orb distance in both scenarios
-            let mut old_min = old_dist_to_moved;
-            let mut new_min = new_dist_to_moved;
-            
-            for (j, &(ox, oy)) in orb_positions.iter().enumerate() {
-                if j == orb_idx {
-                    continue;  // Already handled
-                }
-                let dx = tx - ox;
-                let dy = ty - oy;
-                let dist = (dx * dx + dy * dy).sqrt();
-                old_min = old_min.min(dist);
-                new_min = new_min.min(dist);
-            }
-            
-            // Only add delta if there's a change in nearest orb
-            if (old_min - new_min).abs() > 1e-12 {
-                delta += self.weights[i] * (alpha(new_min) - alpha(old_min));
-            }
-        }
-        
-        delta
-    }
 }
 
 // ============================
@@ -680,22 +586,6 @@ fn weight_density_seed<R: Rng>(problem: &Problem, rng: &mut R) -> Array2<f64> {
     }
     
     orbs
-}
-
-// Load best positions from results.json as seeds
-fn historical_best_seed(idx: usize) -> Option<Array2<f64>> {
-    let results = ResultsFile::load();
-    if idx >= results.high_scores.len() {
-        return None;
-    }
-    
-    let score = &results.high_scores[idx];
-    let mut orbs = Array2::<f64>::zeros((NUM_ORBS, 2));
-    for i in 0..NUM_ORBS.min(score.coordinates.len()) {
-        orbs[[i, 0]] = score.coordinates[i].0;
-        orbs[[i, 1]] = score.coordinates[i].1;
-    }
-    Some(orbs)
 }
 
 fn weighted_farthest_seed<R: Rng>(
@@ -1239,8 +1129,8 @@ struct ResultsFile {
 
 impl ResultsFile {
     fn load() -> Self {
-        if Path::new("results.json").exists() {
-            let content = fs::read_to_string("results.json").unwrap_or_else(|_| "{}".to_string());
+        if Path::new("results2.json").exists() {
+            let content = fs::read_to_string("results2.json").unwrap_or_else(|_| "{}".to_string());
             serde_json::from_str(&content).unwrap_or_else(|_| ResultsFile { high_scores: Vec::new() })
         } else {
             ResultsFile { high_scores: Vec::new() }
@@ -1255,7 +1145,7 @@ impl ResultsFile {
 
     fn save(&self) -> std::io::Result<()> {
         let json = serde_json::to_string_pretty(&self)?;
-        fs::write("results.json", json)?;
+        fs::write("results2.json", json)?;
         Ok(())
     }
 }
@@ -1276,62 +1166,31 @@ fn search(problem: &Problem, max_outer: usize, seed_beam: usize, random_seed: u6
     // Generate seeds with diverse strategies
     let mut seeds = Vec::new();
     
-    // 1. Historical best positions - DISABLED to prevent convergence
-    // Historical seeds were causing repeated 3200.496 scores
-    // Uncomment below to re-enable with strong perturbation
-    /*
-    if rng.gen::<f64>() < 0.3 {  // Only 30% chance to use historical
-        if let Some(hist_seed) = historical_best_seed(0) {
-            // Add strongly jittered version (not the exact historical)
-            let mut jittered = hist_seed;
-            let normal = Normal::new(0.0, 0.8).unwrap();  // Much stronger jitter
-            
-            // Perturb at least 3-5 orbs significantly
-            let orbs_to_perturb = rng.gen_range(3..=5);
-            let mut perturb_indices: Vec<usize> = (0..NUM_ORBS).collect();
-            perturb_indices.shuffle(&mut rng);
-            
-            for &idx in perturb_indices.iter().take(orbs_to_perturb) {
-                jittered[[idx, 0]] += rng.sample(normal) * 2.0;  // Stronger perturbation
-                jittered[[idx, 1]] += rng.sample(normal) * 2.0;
-                let pos = [
-                    clip(jittered[[idx, 0]], 0.0, (GRID_N - 1) as f64),
-                    clip(jittered[[idx, 1]], 0.0, (GRID_N - 1) as f64),
-                ];
-                let proj = project_minsep(&jittered, idx, pos, MIN_SEP);
-                jittered[[idx, 0]] = proj[0];
-                jittered[[idx, 1]] = proj[1];
-            }
-            seeds.push(jittered);
-        }
-    }
-    */
-    
-    // 2. K-means++ for optimal coverage (25% of seeds) - INCREASED
+    // 1. K-means++ for optimal coverage (25% of seeds)
     let kmeans_count = (seed_beam as f64 * 0.25).ceil() as usize;
     for _ in 0..kmeans_count {
         seeds.push(kmeans_plus_plus_seed(problem, &mut rng));
     }
     
-    // 3. Weight density clustering (20% of seeds) - INCREASED
+    // 2. Weight density clustering (20% of seeds)
     let density_count = (seed_beam as f64 * 0.20).ceil() as usize;
     for _ in 0..density_count {
         seeds.push(weight_density_seed(problem, &mut rng));
     }
     
-    // 4. Grid systematic placement (15% of seeds) - INCREASED with variations
+    // 3. Grid systematic placement (15% of seeds)
     let grid_count = (seed_beam as f64 * 0.15).ceil() as usize;
     for _ in 0..grid_count {
         seeds.push(grid_systematic_seed(&mut rng));
     }
     
-    // 5. Spiral placement (10% of seeds) - INCREASED
+    // 4. Spiral placement (10% of seeds)
     let spiral_count = (seed_beam as f64 * 0.10).ceil() as usize;
     for _ in 0..spiral_count {
         seeds.push(spiral_seed(&mut rng));
     }
 
-    // 6. Edge-biased seed and variations (10% of seeds)
+    // 5. Edge-biased seed and variations (10% of seeds)
     seeds.push(edge_biased_seed());
     
     // Jittered edge-biased seeds with varying perturbation levels
@@ -1357,7 +1216,7 @@ fn search(problem: &Problem, max_outer: usize, seed_beam: usize, random_seed: u6
         seeds.push(s);
     }
 
-    // 7. Weighted farthest seeds for remaining slots (20% of seeds) - More diverse
+    // 6. Weighted farthest seeds for remaining slots (20% of seeds)
     while seeds.len() < seed_beam {
         // Vary the trial count for diversity
         let trials = 150 + rng.gen_range(0..150);
@@ -1625,7 +1484,7 @@ fn main() {
     
     // Special case: just view results
     if args.config == "view" {
-        println!("\n=== HIGH SCORES LEADERBOARD (from results.json) ===");
+        println!("\n=== HIGH SCORES LEADERBOARD (from results2.json) ===");
         let results_file = ResultsFile::load();
         if results_file.high_scores.is_empty() {
             println!("No scores above 3200.5 recorded yet.");
@@ -1723,9 +1582,9 @@ fn main() {
                     let mut results_file = ResultsFile::load();
                     results_file.add_score(high_score);
                     if let Err(e) = results_file.save() {
-                        eprintln!("Failed to save to results.json: {}", e);
+                        eprintln!("Failed to save to results2.json: {}", e);
                     } else {
-                        log_info!("    💾 Saved to results.json!");
+                        log_info!("    💾 Saved to results2.json!");
                     }
                     
                     // Print for scores > 3200.51
@@ -1817,8 +1676,8 @@ fn main() {
         log_info!("({:.6}, {:.6})", result.orbs[[i, 0]], result.orbs[[i, 1]]);
     }
     
-    // Display current high scores from results.json
-    log_info!("\n=== HIGH SCORES LEADERBOARD (from results.json) ===");
+    // Display current high scores from results2.json
+    log_info!("\n=== HIGH SCORES LEADERBOARD (from results2.json) ===");
     let results_file = ResultsFile::load();
     if results_file.high_scores.is_empty() {
         log_info!("No scores above 3200.5 recorded yet.");

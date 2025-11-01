@@ -23,7 +23,8 @@
 *.temp
 
 # Results tracking
-results.json
+results*.json
 results*.txt
 bglogs.txt
+*.log
 
